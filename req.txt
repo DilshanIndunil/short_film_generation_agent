@@ -1,0 +1,59 @@
+1. මුලින්ම Model එකක් Code කර කර ඉන්න එපා (Existing Open-Source Models Use කරන්න)
+ඔබට Image Generation model එකක් මුල සිටම train කරමින් ඉන්න ගියොත් කාලය සහ ශ්‍රමය අපතේ යනවා. ඒ වෙනුවට දැන් තියෙන හොඳම Open-Source සහ Open-Weights මාදිලි (Models) API හරහා හෝ Local (ComfyUI) හරහා ඈඳාගැනීම තමයි බුද්ධිමත්ම දේ.
+
+Image Generation සඳහා: FLUX (Flux.1) හෝ SDXL / Stable Diffusion 3 වැනි එකක් පාවිච්චි කරන්න. මේවට පුළුවන් ඉතාම යථාර්ථවාදී (Realistic) මිනිස් රූප සහ මනුෂ්‍ය මුහුණු උත්පාදනය කරන්න.
+
+Image-to-Video (Frames වල සිට Video එකට) සඳහා:
+
+Wan (Wan Animate / Wan 2.1) හෝ LTX (LTX-2) වැනි නවතම Open-Source / Open-Weights වීඩියෝ මාදිලි භාවිත කරන්න. මේවට images දීලා ඒවාට අදාළ motion (චලන) සහ cinematic පෙනුම ලබා දෙන්න පුළුවන්.   
+Floyo
+
+2. Best Architecture Plan එක (Agent කෙනෙක් හරහා Short Film එකක් හදන හැටි)
+ඔබේ Agent කෙනෙක් (Automation Agent) හරහා මුල සිට අගට Short Film එකක් fully automated පද්ධතියක් විදිහට ක්‍රියාත්මක කරන්න අවශ්‍ය නම්, පහත Pipeline එක හදාගන්න:
+
+පියවර 1: Script & Storyboard Generation Agent (LLM + Structured JSON)
+Tool: LangChain, CrewAI, හෝ AutoGen වැනි Python Agent Framework එකක් පාවිච්චි කරන්න. LLM එකක් ලෙස Claude 3.5 Sonnet හෝ GPT-4o වැනි එකක් backend එකට දෙන්න.
+
+Process: Agent එකට Short film එකේ කතාව (Prompt එක) දුන්නම, එයින් Script එක කොටස් වලට (Scenes/Shots) කඩනවා. සෑම Shot එකකටම අදාළව:
+
+Camera Angle (Close-up, Wide shot, etc.)
+
+Character Descriptions (මුහුණේ හැඩය, ඇඳුම් - Character Consistency පවත්වා ගැනීමට මෙය අත්‍යවශ්‍යයි)
+
+Action/Motion Prompt එක
+
+Dialogues / Voiceover text
+සඳහන් කරමින් Structured JSON එකක් පිටදාන විදිහට Agent එක Program කරගන්න.
+
+පියවර 2: Image & Character Consistency Engine (FLUX + LoRA)
+ස්ථාවර මිනිස් චරිත (Characters) පවත්වා ගැනීමට ඇති හොඳම ක්‍රමය වන්නේ LoRA (Low-Rank Adaptation) භාවිත කිරීමයි.   
+Floyo
+
+ඔබේ Short film එකේ ප්‍රධාන චරිත 2-3 කගේ මුහුණු සහ පෙනුම වෙනුවෙන් පුංචි LoRA ෆයිල් එකක් හදාගන්න (ወත් නැතහොත් FLUX IP-Adapter / ControlNet පාවිච්චි කරලා එකම මුහුණ විවිධ Scenes වලට generate කරගන්න).
+
+Agent එක මඟින් දෙන Prompt එක (साथ LoRA trigger word එක) Image Generation Model එකට (ഉදා: Flux) යවා සෑම Shot එකකටම අදාළ Keyframe Image එක Genarate කරගැනීම.
+
+පියවර 3: Image-to-Video Transformation
+ඊළඟට, ඉහත පියවරෙන් generate කරගත් Keyframe images ටික Image-to-Video Model එකකට (උදා: Wan Video හෝ LTX-2) දෙනවා.   
+Floyo
+
+Script එකේ විස්තර කර ඇති Motion Prompt එක (ഉදා: “Person turns around and smiles slowly, cinematic lighting”) මෙහිදී Video model එකට ලබා දී frames ටික කෙටි වීඩියෝ ක්ලිප්ස් (Video Clips) බවට හරවාගන්නවා.   
+Floyo
+
+පියවර 4: Voiceover, Audio & Video Stitching (Automation / FFmpeg)
+Voiceover: ElevenLabs API හෝ Kokoro (Open source TTS) වැනි එකක් පාවිච්චි කරලා script එකේ dialogues වලට අදාළ කටහඬවල් ස්වයංක්‍රීයව generate කරගන්න.
+
+Editing/Assembly: Python වල FFmpeg 라이브러රි එක හෝ MoviePy පාවිච්චි කරලා, Agent එකටම පුළුවන් උත්පාදනය වුණු Video Clips, Voiceovers සහ Background Music එක එකතු කරලා (Stitch කරලා) අවසාන Short Film එක MP4 විදිහට Export කරන්න.
+
+3. ඔබට පටන් ගන්න හොඳම Shortest Path එක (Quickest Implementation)
+ඔබට කේත ලියමින් (Coding) සියල්ල ම මුල සිට හදන්න අපහසු නම් හෝ ඉක්මනින් ප්‍රතිඵල බලාගන්න අවශ්‍ය නම්:
+
+ComfyUI පාවිච්චි කරන්න: Open-source AI ක්‍ෂේත්‍රයේ node-based visual workflow tool එකක් වන ComfyUI එක හරහා ඔබට Flux සහ Image-to-Video මාදිලි එකිනෙකට සම්බන්ධ කරලා (Pipeline එකක් හැඩයට) ඉතා පහසුවෙන් වැඩේ කරගන්න පුළුවන්.   
+comfy.org
+
+Comfy Agent / API: දැන් ComfyUI එක ඇතුළෙම Agent workflows (Comfy Agent) හදාගන්න පුළුවන් පහසුකම් තියෙනවා.   
+comfy.org
+
+නැත්නම්, Python වලින් CrewAI / LangChain භාවිත කරමින් ඉහත සඳහන් කළ API (혹ත් local instances) එකිනෙකට සම්බන්ධ කරන Python Script එකක් ලියන්න.
+
+സාරාංශය: Model එකක් Train කරන්න යන්න එපා. FLUX (Images සඳහා) + Wan/LTX (Video සඳහා) + ElevenLabs (Voice සඳහා) + Python/CrewAI (Agent Orchestration සඳහා) කියන සංයෝජනය තමයි මේ වෙලාවේ තියෙන Bestma Path එක.

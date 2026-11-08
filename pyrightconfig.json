@@ -1,0 +1,21 @@
+{
+  "venvPath": "D:/video-generation-ai/backend",
+  "venv": ".venv",
+  "extraPaths": [
+    "backend",
+    "D:/video-generation-ai/backend/.venv/Lib/site-packages"
+  ],
+  "executionEnvironments": [
+    {
+      "root": "backend",
+      "extraPaths": [
+        "backend",
+        "D:/video-generation-ai/backend/.venv/Lib/site-packages"
+      ]
+    }
+  ],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none"
+}
+

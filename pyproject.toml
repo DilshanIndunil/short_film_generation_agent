@@ -1,0 +1,16 @@
+[tool.pyrefly]
+python-interpreter = "D:/video-generation-ai/backend/.venv/Scripts/python.exe"
+search-path = [
+  "backend",
+  "D:/video-generation-ai/backend/.venv/Lib/site-packages"
+]
+replace-imports-with-any = ["torch", "diffusers", "transformers", "accelerate", "safetensors", "cv2", "PIL"]
+
+[tool.pyright]
+venvPath = "D:/video-generation-ai/backend"
+venv = ".venv"
+extraPaths = [
+  "backend",
+  "D:/video-generation-ai/backend/.venv/Lib/site-packages"
+]
+
