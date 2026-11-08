@@ -1,16 +1,16 @@
 {
-  "venvPath": "D:/video-generation-ai/backend",
+  "venvPath": "D:/film-argent/backend",
   "venv": ".venv",
   "extraPaths": [
     "backend",
-    "D:/video-generation-ai/backend/.venv/Lib/site-packages"
+    "D:/film-argent/backend/.venv/Lib/site-packages"
   ],
   "executionEnvironments": [
     {
       "root": "backend",
       "extraPaths": [
         "backend",
-        "D:/video-generation-ai/backend/.venv/Lib/site-packages"
+        "D:/film-argent/backend/.venv/Lib/site-packages"
       ]
     }
   ],
@@ -18,4 +18,3 @@
   "reportMissingImports": "none",
   "reportMissingModuleSource": "none"
 }
-

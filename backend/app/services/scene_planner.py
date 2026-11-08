@@ -57,7 +57,7 @@ class FilmScenePlannerAgent:
     def _init_gemini(self):
         if self.api_key and self.api_key.startswith("AIzaSy"):
             try:
-                import google.generativeai as genai
+                import google.generativeai as genai  # type: ignore
                 genai.configure(api_key=self.api_key)
                 for candidate in [settings.GEMINI_MODEL, "gemini-2.0-flash", "gemini-1.5-flash"]:
                     if not candidate:

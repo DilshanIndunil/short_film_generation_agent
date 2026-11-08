@@ -1,9 +1,8 @@
 {
-  "python.defaultInterpreterPath": "D:/video-generation-ai/backend/.venv/Scripts/python.exe",
+  "python.defaultInterpreterPath": "D:/film-argent/backend/.venv/Scripts/python.exe",
   "python.analysis.extraPaths": [
     "${workspaceFolder}/backend",
-    "D:/video-generation-ai/backend/.venv/Lib/site-packages"
+    "D:/film-argent/backend/.venv/Lib/site-packages"
   ],
   "python.analysis.typeCheckingMode": "basic"
 }
-

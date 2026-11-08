@@ -1,16 +1,25 @@
 [tool.pyrefly]
-python-interpreter = "D:/video-generation-ai/backend/.venv/Scripts/python.exe"
+python-interpreter = "D:/film-argent/backend/.venv/Scripts/python.exe"
 search-path = [
   "backend",
-  "D:/video-generation-ai/backend/.venv/Lib/site-packages"
+  "D:/film-argent/backend/.venv/Lib/site-packages"
 ]
-replace-imports-with-any = ["torch", "diffusers", "transformers", "accelerate", "safetensors", "cv2", "PIL"]
+replace-imports-with-any = [
+  "torch",
+  "diffusers",
+  "transformers",
+  "accelerate",
+  "safetensors",
+  "cv2",
+  "PIL",
+  "google",
+  "google.generativeai"
+]
 
 [tool.pyright]
-venvPath = "D:/video-generation-ai/backend"
+venvPath = "D:/film-argent/backend"
 venv = ".venv"
 extraPaths = [
   "backend",
-  "D:/video-generation-ai/backend/.venv/Lib/site-packages"
+  "D:/film-argent/backend/.venv/Lib/site-packages"
 ]
-
