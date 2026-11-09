@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from app.schemas.schemas import (
+    StoryBreakdownRequest,
     MultiScenePlanRequest,
     MultiScenePlanResponse,
     GenerateKeyframesRequest,
@@ -16,6 +17,24 @@ from app.services.flux_service import flux_service
 from app.services.wan_video_service import wan_video_service
 
 router = APIRouter(prefix="/scenes", tags=["Film Agent Scene Planner & FLUX Studio"])
+
+@router.post("/breakdown-story", response_model=MultiScenePlanResponse)
+async def breakdown_story_endpoint(payload: StoryBreakdownRequest):
+    """
+    Card 1 (Full Story Text) -> Card 2 (AI Automatic Scene Breakdown):
+    Automatically determines how many scenes are in the user's story, splits it into Scene 1..N,
+    and generates Master Image Prompts + Wan 2.2 Motion Scripts + Sinhala/English Voice-Overs.
+    """
+    try:
+        response = await scene_planner_agent.breakdown_story_to_scenes(
+            story_text=payload.story_text,
+            aspect_ratio=payload.aspect_ratio,
+            flux_model=payload.flux_model,
+            characters=payload.characters
+        )
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/plan-multi", response_model=MultiScenePlanResponse)
 async def plan_multi_scenes_endpoint(payload: MultiScenePlanRequest):
@@ -64,6 +83,8 @@ async def regenerate_keyframe_endpoint(payload: RegenerateSingleKeyframeRequest)
             lighting=payload.lighting,
             aspect_ratio=payload.aspect_ratio or "16:9",
             flux_model=payload.flux_model or "FLUX.1-dev",
+            characters=payload.characters,
+            voiceover_speaker=payload.voiceover_speaker,
             steps=payload.steps
         )
         return updated_frame

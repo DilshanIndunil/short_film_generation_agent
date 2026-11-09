@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # AI Planner / LLM (Loaded securely from .env)
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-2.0-flash"
+    GEMINI_MODEL: str = "gemini-3-flash-preview"
     HF_TOKEN: str = ""
 
     # Local GPU Generation Settings (Loaded from .env)

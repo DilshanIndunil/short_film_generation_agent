@@ -8,6 +8,12 @@ class SceneInputItem(BaseModel):
     duration: str = Field(default="5s", description="Target shot duration")
     characters: List[str] = Field(default_factory=lambda: ["male", "female"], description="Selected characters: 'male', 'female', 'both', or 'none'")
 
+class StoryBreakdownRequest(BaseModel):
+    story_text: str = Field(..., description="Full story or narrative typed by user in Card 1")
+    flux_model: str = "Qwen-Image-2.1"
+    aspect_ratio: str = "16:9"
+    characters: List[str] = Field(default_factory=lambda: ["male", "female"])
+
 class MultiScenePlanRequest(BaseModel):
     flux_model: str = "FLUX.1-dev"
     aspect_ratio: str = "16:9"
@@ -40,6 +46,8 @@ class MultiScenePlanResponse(BaseModel):
     flux_model: str = "FLUX.1-dev"
     aspect_ratio: str = "16:9"
     total_duration_seconds: int = 5
+    story_title: Optional[str] = None
+    story_synopsis: Optional[str] = None
     scenes: List[OptimizedSceneItem]
 
 class SinglePlanInput(BaseModel):
@@ -82,6 +90,8 @@ class RegenerateSingleKeyframeRequest(BaseModel):
     lighting: Optional[str] = None
     aspect_ratio: Optional[str] = "16:9"
     flux_model: Optional[str] = "FLUX.1-dev"
+    characters: Optional[List[str]] = None
+    voiceover_speaker: Optional[str] = None
     steps: int = 28
     guidance_scale: float = 3.5
 

@@ -30,6 +30,8 @@ app.add_middleware(
 # Mount /data directory (Characters, Keyframes, Generated Images, History)
 if os.path.exists(settings.DATA_DIR):
     app.mount("/data", StaticFiles(directory=str(settings.DATA_DIR)), name="data")
+if os.path.exists(settings.CHARACTERS_DIR):
+    app.mount("/characters", StaticFiles(directory=str(settings.CHARACTERS_DIR)), name="characters")
 
 # Mount Production React Frontend Assets if built
 dist_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
