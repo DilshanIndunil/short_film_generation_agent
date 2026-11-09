@@ -127,6 +127,7 @@ class GenerateVideosResponse(BaseModel):
 class RegenerateSingleVideoRequest(BaseModel):
     run_id: str
     scene_number: int
+    total_scenes: Optional[int] = 1
     wan_model: str = "Wan2.2-TI2V-5B"
     aspect_ratio: str = "16:9"
     source_image_url: Optional[str] = None
@@ -138,5 +139,21 @@ class RegenerateSingleVideoRequest(BaseModel):
     voiceover_english: str = ""
     voice_tone: str = "Warm cinematic tone"
     sfx_cue: str = ""
+
+class PreencodeScenePromptItem(BaseModel):
+    scene_number: int = 1
+    video_motion_prompt: str = ""
+    voiceover_speaker: str = "Maya (Female Lead)"
+
+class PreencodeVideoPromptsRequest(BaseModel):
+    run_id: str = ""
+    wan_model: str = "LTX-Video-2B"
+    scenes: List[PreencodeScenePromptItem]
+
+class PreencodeVideoPromptsResponse(BaseModel):
+    success: bool = True
+    encoded_count: int = 0
+    cached_hits: int = 0
+
 
 

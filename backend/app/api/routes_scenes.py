@@ -10,7 +10,9 @@ from app.schemas.schemas import (
     GenerateVideosRequest,
     GenerateVideosResponse,
     RegenerateSingleVideoRequest,
-    VideoClipItem
+    VideoClipItem,
+    PreencodeVideoPromptsRequest,
+    PreencodeVideoPromptsResponse,
 )
 from app.services.scene_planner import scene_planner_agent
 from app.services.flux_service import flux_service
@@ -110,6 +112,26 @@ async def generate_videos_endpoint(payload: GenerateVideosRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/preencode-video-prompts", response_model=PreencodeVideoPromptsResponse)
+async def preencode_video_prompts_endpoint(payload: PreencodeVideoPromptsRequest):
+    """
+    Stage 2A (1-Time Batch Prompt Pre-Encoding):
+    Loads isolated FP8 T5EncoderModel once, batch-encodes all N scene motion prompts into tiny CPU cache tensors,
+    and completely unloads T5 before scene-by-scene GPU video rendering begins.
+    """
+    try:
+        scene_dicts = [
+            s.model_dump() if hasattr(s, "model_dump") else s.dict()
+            for s in payload.scenes
+        ]
+        result = await wan_video_service.preencode_scene_prompts(
+            scenes=scene_dicts,
+            wan_model=payload.wan_model,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/regenerate-video", response_model=VideoClipItem)
 async def regenerate_video_endpoint(payload: RegenerateSingleVideoRequest):
     """
@@ -119,6 +141,7 @@ async def regenerate_video_endpoint(payload: RegenerateSingleVideoRequest):
         updated_video = await wan_video_service.regenerate_single_video(
             run_id=payload.run_id,
             scene_number=payload.scene_number,
+            total_scenes=payload.total_scenes or 1,
             wan_model=payload.wan_model,
             aspect_ratio=payload.aspect_ratio,
             source_image_url=payload.source_image_url,

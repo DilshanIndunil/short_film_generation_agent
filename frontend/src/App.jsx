@@ -180,7 +180,7 @@ function buildEdgesForSceneCount(sceneCount) {
 }
 
 const DEFAULT_STORY_SCRIPT =
-  "the way you threat your mother is the way life will threat you. listen carefully, audience , this is a lesson many people learn only when is too late. a mother's love is one of the few gifts in this world that ask for nothing in return. before you ever spoke your first word, she was already speaking prayers over your life , before you took first step, she was carrying your weight without complaint. she sacrificed her comfort so that you could have a better future. never take that love for granted.";
+  "the way you threat your mother is the way life will threat you.";
 
 const DEFAULT_NODES = [
   {
@@ -291,7 +291,7 @@ export default function App() {
         const list = await res.json();
         setHistoryRuns(list);
       }
-    } catch {}
+    } catch { }
   }, []);
 
   useEffect(() => {
@@ -303,7 +303,7 @@ export default function App() {
           setGpuInfo(`${st.gpu_device} (${st.vram_gb}GB)`);
         }
       })
-      .catch(() => {});
+      .catch(() => { });
   }, [fetchHistoryList]);
 
   const onNodeDragStop = useCallback(
@@ -312,7 +312,7 @@ export default function App() {
         try {
           const positions = currentNodes.map((n) => ({ id: n.id, position: n.position }));
           localStorage.setItem(STORAGE_KEY, JSON.stringify(positions));
-        } catch {}
+        } catch { }
         return currentNodes;
       });
     },
@@ -423,10 +423,10 @@ export default function App() {
           data.storyboard?.scenes?.length > 0
             ? data.storyboard.scenes
             : (data.planned_scenes || []).map((ps, idx) => ({
-                id: idx + 1,
-                text: ps.raw_prompt || '',
-                duration: ps.duration || '5s',
-              }));
+              id: idx + 1,
+              text: ps.raw_prompt || '',
+              duration: ps.duration || '5s',
+            }));
         const restoredStoryText =
           data.storyboard?.story_text ||
           restoredScenes
@@ -566,7 +566,7 @@ export default function App() {
             );
           }
         }
-      } catch {}
+      } catch { }
     }, 220);
 
     let optimizedScenesData = [];
@@ -750,7 +750,7 @@ export default function App() {
             newScene = enrichSceneWithVideoAndVO(candidate, sceneIdx, Boolean(isSame || !candidate.video_motion_prompt), characters);
           }
         }
-      } catch {}
+      } catch { }
 
       if (!newScene) {
         newScene = enrichSceneWithVideoAndVO(
@@ -827,7 +827,7 @@ export default function App() {
               );
             }
           }
-        } catch {}
+        } catch { }
       }, 500);
 
       try {
@@ -942,7 +942,7 @@ export default function App() {
               );
             }
           }
-        } catch {}
+        } catch { }
       }, 500);
 
       try {
@@ -1081,11 +1081,33 @@ export default function App() {
               );
             }
           }
-        } catch {}
+        } catch { }
       }, 500);
 
       const videos = [];
       try {
+        // Stage 2A: Batch pre-encode ALL N scene prompts once in isolated FP8 T5 so T5 unloads before GPU video loop
+        try {
+          addLog(`[Stage 1/2 • FP8 Batch Cache] Pre-encoding all ${scenesPayload.length} scene motion prompt(s) once before GPU video synthesis...`, 'info');
+          const preRes = await fetch('/api/v1/scenes/preencode-video-prompts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              run_id: runId,
+              wan_model: wanModel,
+              scenes: scenesPayload.map((scItem, i) => ({
+                scene_number: i + 1,
+                video_motion_prompt: (scItem && scItem.video_motion_prompt) || '',
+                voiceover_speaker: (scItem && scItem.voiceover_speaker) || 'Maya (Female Lead)',
+              })),
+            }),
+          });
+          if (preRes.ok) {
+            const preData = await preRes.json();
+            addLog(`[Stage 1/2 Complete] Cached ${preData.encoded_count + preData.cached_hits} scene embedding(s) & released T5! Launching ~2.6 GB FP8 GPU Video Engine...`, 'success');
+          }
+        } catch { }
+
         for (let idx = 0; idx < scenesPayload.length; idx++) {
           const sceneNum = idx + 1;
           const sc = scenesPayload[idx] || {};
@@ -1139,6 +1161,7 @@ export default function App() {
             body: JSON.stringify({
               run_id: runId,
               scene_number: sceneNum,
+              total_scenes: scenesPayload.length,
               wan_model: wanModel,
               aspect_ratio: aspectRatio,
               source_image_url: fr.imageUrl || fr.url,
@@ -1191,15 +1214,15 @@ export default function App() {
           nds.map((n) =>
             n.id.startsWith('video-') || n.id.startsWith('scene-')
               ? {
-                  ...n,
-                  data: {
-                    ...n.data,
-                    isActive: false,
-                    isGeneratingVideos: false,
-                    isRegeneratingVideo: null,
-                    liveProgress: null,
-                  },
-                }
+                ...n,
+                data: {
+                  ...n.data,
+                  isActive: false,
+                  isGeneratingVideos: false,
+                  isRegeneratingVideo: null,
+                  liveProgress: null,
+                },
+              }
               : n
           )
         );
@@ -1321,7 +1344,7 @@ export default function App() {
               }
             }
           }
-        } catch {}
+        } catch { }
       }, 500);
 
       try {
@@ -1448,7 +1471,7 @@ export default function App() {
           });
           fetchHistoryList();
           setSelectedRunId(runId);
-        } catch {}
+        } catch { }
       } catch (err) {
         // NEVER load old history on error! Report the error cleanly.
         addLog(`[GPU Generation Error] ${err.message}`, 'error');

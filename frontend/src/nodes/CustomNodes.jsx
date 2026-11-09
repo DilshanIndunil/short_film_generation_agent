@@ -941,7 +941,7 @@ export function enrichSceneWithVideoAndVO(sc = {}, idx = 0, forceFresh = false, 
     'leaning slightly toward the podcast microphone, articulating each word clearly with natural breathing and blinking',
   ]);
 
-  const defaultMotion = `24fps realistic podcast studio video. ${speaker} is ${gesture} while speaking the line: "${rawText || 'spoken script segment'}". Background studio backdrop and foreground podcast microphone remain steady and sharp.`;
+  const defaultMotion = `24fps realistic podcast studio video. ${speaker} is ${gesture}. Natural rhythmic lip and jaw articulation, periodic eye blinking, subtle head nods, and steady locked-off studio tripod framing.`;
   const defaultVoSi = sc.voiceover_sinhala || rawText || 'Spoken script segment';
   const defaultVoEn = sc.voiceover_english || rawText || 'Spoken script segment';
   const defaultSfx = sc.sfx_cue || 'Clean studio room tone, warm vocal presence';

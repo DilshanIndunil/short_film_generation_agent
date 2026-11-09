@@ -4,6 +4,7 @@ import time
 import json
 import shutil
 import random
+import hashlib
 import asyncio
 import logging
 from datetime import datetime
@@ -56,6 +57,8 @@ class FluxLocalGPUService:
         self.active_engine_type: Optional[str] = None  # "qwen_native" | "flux_native" | "local_gpu_diffusion"
         self.active_model_name: Optional[str] = None
         self.active_model_path: Optional[str] = None
+        # Lightweight CPU RAM prompt-embedding cache (prompt_sha256 -> (prompt_embeds_cpu, prompt_embeds_mask_cpu))
+        self._qwen_embed_cache: Dict[str, tuple[Any, Any]] = {}
         self.progress: Dict[str, Any] = {
             "active": False,
             "node": "idle",
@@ -200,9 +203,55 @@ class FluxLocalGPUService:
             ]
         }
 
-    def _unload_active_pipelines(self):
+    @staticmethod
+    def _strip_all_model_hooks(module: Any) -> None:
+        if module is None:
+            return
+        try:
+            for _, submod in module.named_modules():
+                if hasattr(submod, "_diffusers_hook"):
+                    reg = submod._diffusers_hook
+                    for h_name in reversed(list(reg.hooks.keys())):
+                        if h_name == "layerwise_casting":
+                            continue
+                        try:
+                            reg.remove_hook(h_name, recurse=False)
+                        except Exception:
+                            pass
+                    try:
+                        delattr(submod, "_diffusers_hook")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            from accelerate.hooks import remove_hook_from_submodules  # type: ignore
+            remove_hook_from_submodules(module)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _reclaim_gpu_and_os_memory() -> None:
         import gc
-        import torch  # type: ignore
+        gc.collect()
+        gc.collect()
+        try:
+            import torch  # type: ignore
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:
+            pass
+        try:
+            import ctypes
+            ctypes.cdll.msvcrt._heapmin()
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.kernel32.SetProcessWorkingSetSize(handle, ctypes.c_size_t(-1), ctypes.c_size_t(-1))
+        except Exception:
+            pass
+
+    def _unload_active_pipelines(self):
         for pipe in (self.qwen_pipe, self.flux_pipe, self.gpu_pipe):
             if pipe is not None:
                 try:
@@ -210,44 +259,34 @@ class FluxLocalGPUService:
                         pipe.maybe_free_model_hooks()
                 except Exception:
                     pass
-                try:
-                    from accelerate.hooks import remove_hook_from_submodules  # type: ignore
-                    for attr in ("text_encoder", "text_encoder_2", "transformer", "unet", "vae"):
-                        comp = getattr(pipe, attr, None)
-                        if comp is not None:
-                            remove_hook_from_submodules(comp)
-                except Exception:
-                    pass
+                for attr in ("text_encoder", "text_encoder_2", "transformer", "unet", "vae"):
+                    comp = getattr(pipe, attr, None)
+                    if comp is not None:
+                        self._strip_all_model_hooks(comp)
         self.qwen_pipe = None
         self.flux_pipe = None
         self.gpu_pipe = None
         self.is_loaded = False
         self.active_engine_type = None
-        gc.collect()
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        self._reclaim_gpu_and_os_memory()
 
     def try_load_pipeline(self, requested_model: str = "Qwen-Image-2.1") -> bool:
         """
-        Loads the user-selected Local GPU Image Generation Pipeline onto NVIDIA GeForce RTX 4060 (8GB VRAM)
-        with CPU offload to guarantee 0 CUDA Out-Of-Memory errors:
-        - When 'Qwen-Image-2.1' / 'Qwen' is selected: loads QwenImage21Pipeline from d:\\film-argent\\backend\\models\\qwen
-        - When 'FLUX.1-dev' / 'FLUX.2' is selected: loads Local GPU Checkpoint + Fine-Tuned Character LoRA (film_characters_lora.safetensors)
-        - When 'FLUX.1-schnell' is selected: loads Native FLUX weights (flux1-schnell-fp8.safetensors) or Local GPU Checkpoint
+        Prepares the user-selected Local GPU Image Generation Engine on NVIDIA GeForce RTX 4060 (8GB VRAM):
+        - When 'Qwen-Image-2.1' / 'Qwen' is selected: configures Isolated 3-Micro-Stage FP8 + Async Stream Execution
+          (never loads the full 30.84 GB checkpoint simultaneously, eliminating Windows commit-limit crashes).
+        - When 'FLUX.1-dev' / 'FLUX.2' is selected: loads Local GPU Checkpoint + Fine-Tuned Character LoRA.
         """
         req_lower = (requested_model or "Qwen-Image-2.1").lower()
         wants_qwen = "qwen" in req_lower
 
-        # Return immediately if the requested engine (or universal Qwen GPU engine when SDXL checkpoint is absent) is already loaded
         if self.is_loaded:
-            if wants_qwen and self.active_engine_type == "qwen_native" and self.qwen_pipe is not None:
+            if wants_qwen and self.active_engine_type == "qwen_native":
                 return True
             if not wants_qwen and self.active_engine_type in ("local_gpu_diffusion", "flux_native") and (self.gpu_pipe is not None or self.flux_pipe is not None):
                 return True
-            if not wants_qwen and self.active_engine_type == "qwen_native" and self.qwen_pipe is not None and self.find_local_gpu_checkpoint() is None:
+            if not wants_qwen and self.active_engine_type == "qwen_native" and self.find_local_gpu_checkpoint() is None:
                 return True
-            # Otherwise unload the previous model before switching engines on 8GB VRAM
             logger.info(f"Switching image generation engine from {self.active_engine_type} to requested model '{requested_model}'...")
             self._unload_active_pipelines()
 
@@ -257,7 +296,7 @@ class FluxLocalGPUService:
                 logger.warning("CUDA is not available. Local GPU inference requires NVIDIA GPU.")
                 return False
 
-            # Free video generation pipeline VRAM if loaded
+            # Free video generation pipeline VRAM/RAM if loaded
             try:
                 from app.services.wan_video_service import wan_video_service
                 wan_video_service.unload_pipeline()
@@ -267,55 +306,26 @@ class FluxLocalGPUService:
             qwen_dir = self.find_qwen_model_dir()
             gpu_ckpt = self.find_local_gpu_checkpoint()
             char_lora = self.find_character_lora()
-            flux_file = self.find_flux_weights()
 
-            def _load_qwen_pipeline() -> bool:
+            def _configure_qwen_staged_engine() -> bool:
                 if not qwen_dir:
                     return False
-                import gc
-                import diffusers as _diffusers  # type: ignore
-                QwenImage21Pipeline = getattr(_diffusers, "QwenImage21Pipeline")
-                for attempt in range(2):
-                    try:
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                        logger.info(f"Loading Qwen-Image-2.1 Pipeline from {qwen_dir} on {torch.cuda.get_device_name(0)} (attempt {attempt + 1}/2)...")
-                        pipe_qwen: Any = QwenImage21Pipeline.from_pretrained(
-                            str(qwen_dir),
-                            torch_dtype=torch.bfloat16,
-                            low_cpu_mem_usage=True,
-                            local_files_only=True
-                        )
-                        # Enable CPU offload so 7B DiT + Qwen3-VL text encoder fit smoothly on 8GB RTX 4060 VRAM
-                        try:
-                            pipe_qwen.enable_sequential_cpu_offload()
-                        except Exception:
-                            pipe_qwen.enable_model_cpu_offload()
-                        try:
-                            if hasattr(pipe_qwen, "vae") and pipe_qwen.vae is not None:
-                                if hasattr(pipe_qwen.vae, "enable_slicing"):
-                                    pipe_qwen.vae.enable_slicing()
-                                if hasattr(pipe_qwen.vae, "enable_tiling"):
-                                    pipe_qwen.vae.enable_tiling()
-                        except Exception:
-                            pass
-                        self.qwen_pipe = pipe_qwen
-                        self.active_engine_type = "qwen_native"
-                        self.active_model_name = "Qwen-Image-2.1"
-                        self.active_model_path = str(qwen_dir)
-                        self.is_loaded = True
-                        logger.info("[SUCCESS] Qwen-Image-2.1 Pipeline (models/qwen) loaded on Local RTX 4060 GPU!")
-                        return True
-                    except Exception as qwen_err:
-                        logger.warning(f"Qwen-Image-2.1 load attempt {attempt + 1} notice: {qwen_err}")
-                        self._unload_active_pipelines()
-                        time.sleep(0.8)
-                return False
+                required = [qwen_dir / "text_encoder", qwen_dir / "transformer", qwen_dir / "vae", qwen_dir / "processor", qwen_dir / "scheduler"]
+                if not all(p.exists() for p in required):
+                    logger.warning(f"Qwen-Image-2.1 directory {qwen_dir} is missing required subfolders.")
+                    return False
+                self._unload_active_pipelines()
+                self.qwen_pipe = None
+                self.active_engine_type = "qwen_native"
+                self.active_model_name = "Qwen-Image-2.1"
+                self.active_model_path = str(qwen_dir)
+                self.is_loaded = True
+                logger.info(f"[SUCCESS] Qwen-Image-2.1 Smart Hybrid FP8 Staged Engine ready ({qwen_dir}) on {torch.cuda.get_device_name(0)}!")
+                return True
 
-            # 1. If Qwen-Image-2.1 is selected OR if SDXL base checkpoint is absent, use the complete Local Qwen-Image-2.1 GPU Pipeline (models/qwen)
+            # 1. If Qwen-Image-2.1 is selected OR if SDXL base checkpoint is absent, use Staged FP8 Qwen-Image-2.1 Engine
             if (wants_qwen or gpu_ckpt is None) and qwen_dir:
-                if _load_qwen_pipeline():
+                if _configure_qwen_staged_engine():
                     return True
 
             # 2. Load Local 6.9GB GPU Diffusion Checkpoint + Fine-Tuned Character LoRA on RTX 4060
@@ -380,15 +390,284 @@ class FluxLocalGPUService:
                 logger.info("[SUCCESS] Local RTX 4060 GPU Cinema Pipeline Ready!")
                 return True
 
-            # 4. Universal Local GPU Fallback -> Load Qwen-Image-2.1 (models/qwen)
+            # 4. Universal Local GPU Fallback -> Staged FP8 Qwen-Image-2.1 (models/qwen)
             if qwen_dir:
-                logger.info(f"Routing '{requested_model}' to verified Local GPU Qwen-Image-2.1 Pipeline ({qwen_dir})...")
-                if _load_qwen_pipeline():
+                logger.info(f"Routing '{requested_model}' to verified Local GPU Qwen-Image-2.1 Staged FP8 Engine ({qwen_dir})...")
+                if _configure_qwen_staged_engine():
                     return True
 
         except Exception as e:
             logger.error(f"Failed to load local GPU pipeline: {e}")
         return False
+
+    def _render_qwen_staged_fp8(
+        self,
+        qwen_dir: Path,
+        sanitized_prompt: str,
+        width: int,
+        height: int,
+        qwen_steps: int,
+        generator: Any,
+        img_filepath: Path,
+        current_scene: int,
+        total_scenes: int,
+    ) -> None:
+        """
+        Smart Hybrid 3-Micro-Stage Qwen-Image-2.1 Renderer for 16GB RAM + 8GB RTX 4060 (Ada FP8):
+          Stage 1A: Isolated Qwen3-VL Text Encoder (FP8 layerwise cast) -> caches prompt_embeds (<2MB) -> 100% Unload
+          Stage 1B: Isolated QwenImage21Transformer2DModel (FP8 storage ~6.6GB + Async CUDA Stream Group Offload) -> latents -> 100% Unload
+          Stage 1C: Isolated AutoencoderKLQwenImage21 (1.26GB directly on GPU) -> high-res PNG decode -> 100% Unload
+        """
+        import gc
+        import torch  # type: ignore
+        from transformers import Qwen3VLProcessor, Qwen3VLForConditionalGeneration  # type: ignore
+        from diffusers import (  # type: ignore
+            QwenImage21Pipeline,
+            QwenImage21Transformer2DModel,
+            AutoencoderKLQwenImage21,
+            FlowMatchEulerDiscreteScheduler,
+        )
+        from diffusers.hooks import apply_layerwise_casting, apply_group_offloading  # type: ignore
+
+        # Ensure any video or legacy image pipelines are completely out of RAM/VRAM first
+        try:
+            from app.services.wan_video_service import wan_video_service
+            wan_video_service.unload_pipeline()
+        except Exception:
+            pass
+        self._reclaim_gpu_and_os_memory()
+
+        # ---------------- STAGE 1A: PROMPT ENCODING (WITH CACHE) ----------------
+        cache_key = hashlib.sha256(sanitized_prompt.encode("utf-8")).hexdigest()
+        cached_entry = self._qwen_embed_cache.get(cache_key)
+
+        if cached_entry is not None:
+            pe_cpu, pm_cpu = cached_entry
+            logger.info("[Qwen-Image-2.1 Stage 1/3] Reusing cached prompt_embeds (0.0s, 0 GB Text Encoder load)!")
+        else:
+            self.set_progress(
+                node="card3",
+                current_scene=current_scene,
+                total_scenes=total_scenes,
+                step=0,
+                total_steps=qwen_steps,
+                message=f"Scene {current_scene}/{total_scenes}: [Stage 1/3] Encoding Master Prompt via Qwen3-VL (FP8 Isolated)...",
+            )
+            logger.info(f"[Qwen-Image-2.1 Stage 1/3] Loading isolated Qwen3-VL Text Encoder from {qwen_dir / 'text_encoder'}...")
+            processor: Any = None
+            scheduler_enc: Any = None
+            text_encoder: Any = None
+            enc_pipe: Any = None
+            try:
+                processor = Qwen3VLProcessor.from_pretrained(str(qwen_dir / "processor"), local_files_only=True)
+                scheduler_enc = FlowMatchEulerDiscreteScheduler.from_pretrained(str(qwen_dir / "scheduler"), local_files_only=True)
+                text_encoder = Qwen3VLForConditionalGeneration.from_pretrained(
+                    str(qwen_dir / "text_encoder"),
+                    torch_dtype=torch.bfloat16,
+                    low_cpu_mem_usage=True,
+                    local_files_only=True,
+                )
+                try:
+                    apply_layerwise_casting(
+                        text_encoder,
+                        storage_dtype=torch.float8_e4m3fn,
+                        compute_dtype=torch.bfloat16,
+                    )
+                    gc.collect()
+                except Exception as lc_err:
+                    logger.debug(f"Qwen3-VL FP8 cast notice: {lc_err}")
+
+                apply_group_offloading(
+                    text_encoder,
+                    onload_device=torch.device("cuda"),
+                    offload_device=torch.device("cpu"),
+                    offload_type="leaf_level",
+                    non_blocking=True,
+                    low_cpu_mem_usage=True,
+                )
+                enc_pipe = QwenImage21Pipeline(
+                    scheduler=scheduler_enc,
+                    vae=None,
+                    text_encoder=text_encoder,
+                    processor=processor,
+                    transformer=None,
+                )
+                with torch.inference_mode():
+                    pe, pm, _ = enc_pipe.encode_prompt(
+                        prompt=sanitized_prompt,
+                        device=torch.device("cuda"),
+                        num_images_per_prompt=1,
+                    )
+                pe_cpu = pe.detach().to("cpu", dtype=torch.bfloat16).clone()
+                pm_cpu = pm.detach().to("cpu").clone() if pm is not None else None
+                del pe, pm
+
+                if len(self._qwen_embed_cache) >= 16:
+                    oldest_key = next(iter(self._qwen_embed_cache))
+                    self._qwen_embed_cache.pop(oldest_key, None)
+                self._qwen_embed_cache[cache_key] = (pe_cpu, pm_cpu)
+                logger.info(f"[Qwen-Image-2.1 Stage 1/3] Prompt encoded ({tuple(pe_cpu.shape)})! Releasing Qwen3-VL from RAM...")
+            finally:
+                if text_encoder is not None:
+                    self._strip_all_model_hooks(text_encoder)
+                del enc_pipe, text_encoder, processor, scheduler_enc
+                self._reclaim_gpu_and_os_memory()
+
+        # ---------------- STAGE 1B: FP8 TRANSFORMER DENOISING ----------------
+        self.set_progress(
+            node="card3",
+            current_scene=current_scene,
+            total_scenes=total_scenes,
+            step=0,
+            total_steps=qwen_steps,
+            message=f"Scene {current_scene}/{total_scenes}: [Stage 2/3] Loading Qwen-Image-2.1 FP8 Transformer (6.6 GB) on RTX 4060...",
+        )
+        logger.info(f"[Qwen-Image-2.1 Stage 2/3] Loading isolated FP8 QwenImage21Transformer2DModel ({qwen_steps} steps)...")
+
+        def _qwen_step_cb(pipeline, step_index, timestep, callback_kwargs):
+            step_num = min(step_index + 1, qwen_steps)
+            percent = int((step_num / max(qwen_steps, 1)) * 100)
+            filled = int(percent / 10)
+            bar = "█" * filled + "░" * (10 - filled)
+            scene_label = f"Scene {current_scene}/{total_scenes}"
+            msg = f"{scene_label}: [{bar}] {percent}% (Step {step_num}/{qwen_steps}) ⚡ Qwen-Image-2.1 FP8 • RTX 4060"
+            self.set_progress(
+                node="card3",
+                current_scene=current_scene,
+                total_scenes=total_scenes,
+                step=step_num,
+                total_steps=qwen_steps,
+                message=msg,
+            )
+            return callback_kwargs
+
+        processor_den: Any = None
+        scheduler_den: Any = None
+        transformer: Any = None
+        denoise_pipe: Any = None
+        pe_gpu: Any = None
+        pm_gpu: Any = None
+        latents_cpu: Any = None
+        vae_scale_factor: int = 16
+        image_processor: Any = None
+
+        try:
+            processor_den = Qwen3VLProcessor.from_pretrained(str(qwen_dir / "processor"), local_files_only=True)
+            scheduler_den = FlowMatchEulerDiscreteScheduler.from_pretrained(str(qwen_dir / "scheduler"), local_files_only=True)
+            transformer = QwenImage21Transformer2DModel.from_pretrained(
+                str(qwen_dir / "transformer"),
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                local_files_only=True,
+            )
+            # Native RTX 4060 Ada FP8 storage (~6.6 GB in physical RAM!) + bfloat16 Tensor Core compute
+            transformer.enable_layerwise_casting(
+                storage_dtype=torch.float8_e4m3fn,
+                compute_dtype=torch.bfloat16,
+            )
+            gc.collect()
+            try:
+                transformer.enable_group_offload(
+                    onload_device=torch.device("cuda"),
+                    offload_device=torch.device("cpu"),
+                    offload_type="block_level",
+                    num_blocks_per_group=1,
+                    use_stream=True,
+                    low_cpu_mem_usage=True,
+                )
+            except Exception:
+                transformer.enable_group_offload(
+                    onload_device=torch.device("cuda"),
+                    offload_device=torch.device("cpu"),
+                    offload_type="leaf_level",
+                    use_stream=True,
+                    low_cpu_mem_usage=True,
+                )
+
+            denoise_pipe = QwenImage21Pipeline(
+                scheduler=scheduler_den,
+                vae=None,
+                text_encoder=None,
+                processor=processor_den,
+                transformer=transformer,
+            )
+            pe_gpu = pe_cpu.to(device="cuda", dtype=torch.bfloat16)
+            pm_gpu = pm_cpu.to(device="cuda") if pm_cpu is not None else None
+
+            with torch.inference_mode():
+                denoise_out = denoise_pipe(
+                    prompt=None,
+                    prompt_embeds=pe_gpu,
+                    prompt_embeds_mask=pm_gpu,
+                    width=width,
+                    height=height,
+                    num_inference_steps=qwen_steps,
+                    generator=generator,
+                    output_type="latent",
+                    callback_on_step_end=_qwen_step_cb,
+                )
+            latents_cpu = denoise_out.images.detach().to("cpu").clone()
+            vae_scale_factor = denoise_pipe.vae_scale_factor
+            image_processor = denoise_pipe.image_processor
+            del denoise_out
+            logger.info("[Qwen-Image-2.1 Stage 2/3] Denoising complete! Releasing FP8 Transformer before GPU VAE decode...")
+        finally:
+            if transformer is not None:
+                self._strip_all_model_hooks(transformer)
+            del pe_gpu, pm_gpu, denoise_pipe, transformer, processor_den, scheduler_den
+            self._reclaim_gpu_and_os_memory()
+
+        # ---------------- STAGE 1C: ISOLATED GPU VAE DECODE ----------------
+        self.set_progress(
+            node="card3",
+            current_scene=current_scene,
+            total_scenes=total_scenes,
+            step=qwen_steps,
+            total_steps=qwen_steps,
+            message=f"Scene {current_scene}/{total_scenes}: [Stage 3/3] Decoding {width}x{height} Master Frame via RTX 4060 VAE...",
+        )
+        logger.info(f"[Qwen-Image-2.1 Stage 3/3] Loading isolated AutoencoderKLQwenImage21 (1.26 GB) on RTX 4060 GPU...")
+        vae: Any = None
+        try:
+            vae = AutoencoderKLQwenImage21.from_pretrained(
+                str(qwen_dir / "vae"),
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                local_files_only=True,
+            ).to("cuda")
+            if hasattr(vae, "enable_slicing"):
+                vae.enable_slicing()
+            if hasattr(vae, "enable_tiling"):
+                vae.enable_tiling()
+
+            multiple_of = vae_scale_factor * 2
+            eff_w = (width // multiple_of) * multiple_of
+            eff_h = (height // multiple_of) * multiple_of
+
+            with torch.inference_mode():
+                latents_gpu = QwenImage21Pipeline._unpack_latents(
+                    latents_cpu.to("cuda"), eff_h, eff_w, vae_scale_factor
+                ).to(device="cuda", dtype=vae.dtype)
+                latents_mean = (
+                    torch.tensor(vae.config.latents_mean, device=latents_gpu.device, dtype=latents_gpu.dtype)
+                    .view(1, vae.config.z_dim, 1, 1, 1)
+                )
+                latents_std = (
+                    torch.tensor(vae.config.latents_std, device=latents_gpu.device, dtype=latents_gpu.dtype)
+                    .view(1, vae.config.z_dim, 1, 1, 1)
+                )
+                latents_gpu = latents_gpu * latents_std + latents_mean
+                decoded = vae.decode(latents_gpu, return_dict=False)[0][:, :, 0]
+                pil_image = image_processor.postprocess(decoded, output_type="pil")[0]
+
+            if (pil_image.width, pil_image.height) != (width, height):
+                pil_image = pil_image.resize((width, height), Image.Resampling.LANCZOS)
+            pil_image.save(img_filepath)
+            del latents_gpu, decoded, latents_cpu
+            logger.info(f"[Qwen-Image-2.1 Stage 3/3] Saved {width}x{height} Master Frame to {img_filepath} & freed all RAM/VRAM!")
+        finally:
+            del vae
+            self._reclaim_gpu_and_os_memory()
 
     def _sanitize_prompt_for_selected_character(
         self,
@@ -569,24 +848,20 @@ class FluxLocalGPUService:
                     message=f"Scene {current_scene}/{total_scenes}: [░░░░░░░░░░] 0% (Initializing {flux_model} on RTX 4060 GPU...)"
                 )
 
-                if self.active_engine_type == "qwen_native" and self.qwen_pipe is not None:
-                    qwen_runner: Any = self.qwen_pipe
+                if self.active_engine_type == "qwen_native" and self.active_model_path:
                     qwen_steps = 16 if num_inference_steps >= 20 else max(12, num_inference_steps)
-                    logger.info(f"[Qwen-Image-2.1 Local GPU] Rendering {width}x{height} ({qwen_steps} steps) for Scene {current_scene}: '{sanitized_prompt[:110]}...'")
-                    image = qwen_runner(
-                        prompt=sanitized_prompt,
+                    logger.info(f"[Qwen-Image-2.1 Staged FP8] Rendering {width}x{height} ({qwen_steps} steps) for Scene {current_scene}: '{sanitized_prompt[:110]}...'")
+                    self._render_qwen_staged_fp8(
+                        qwen_dir=Path(self.active_model_path),
+                        sanitized_prompt=sanitized_prompt,
                         width=width,
                         height=height,
-                        num_inference_steps=qwen_steps,
+                        qwen_steps=qwen_steps,
                         generator=generator,
-                        callback_on_step_end=step_callback
-                    ).images[0]
-                    image.save(img_filepath)
-                    try:
-                        if hasattr(qwen_runner, "maybe_free_model_hooks"):
-                            qwen_runner.maybe_free_model_hooks()
-                    except Exception:
-                        pass
+                        img_filepath=img_filepath,
+                        current_scene=current_scene,
+                        total_scenes=total_scenes,
+                    )
                 elif self.active_engine_type == "flux_native" and self.flux_pipe is not None:
                     flux_runner: Any = self.flux_pipe
                     flux_steps = 4 if "schnell" in flux_model.lower() else min(num_inference_steps, 28)

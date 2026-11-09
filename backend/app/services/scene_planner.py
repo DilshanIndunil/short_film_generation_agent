@@ -961,8 +961,9 @@ Return ONLY a valid JSON object matching this exact schema:
                                 item["action"] = f"{speaker_label} {gesture}."
                             if not count_matches or not item.get("video_motion_prompt"):
                                 item["video_motion_prompt"] = (
-                                    f"24fps realistic podcast studio video. {speaker_label} is {gesture} while speaking the line: \"{line_text}\". "
-                                    f"Background curtain and foreground studio microphone remain steady and sharp."
+                                    f"24fps realistic podcast studio video. {speaker_label} is {gesture}. "
+                                    f"Natural rhythmic lip and jaw articulation, periodic eye blinking, subtle head nods, "
+                                    f"and steady locked-off tripod framing."
                                 )
                             if not count_matches or not item.get("voiceover_english"):
                                 item["voiceover_english"] = line_text
@@ -1012,8 +1013,9 @@ Return ONLY a valid JSON object matching this exact schema:
                         environment=fresh_studio_master["environment"],
                         flux_model=flux_model,
                         video_motion_prompt=(
-                            f"24fps realistic podcast studio video. {speaker_label} is {gesture} while speaking the line: \"{line_text}\". "
-                            f"Background curtain and foreground studio microphone remain steady and sharp."
+                            f"24fps realistic podcast studio video. {speaker_label} is {gesture}. "
+                            f"Natural rhythmic lip and jaw articulation, periodic eye blinking, subtle head nods, "
+                            f"and steady locked-off tripod framing."
                         ),
                         voiceover_speaker=speaker_label,
                         voiceover_sinhala=line_text,
