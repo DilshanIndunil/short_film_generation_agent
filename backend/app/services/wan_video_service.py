@@ -52,6 +52,120 @@ class WanVideoStudioService:
         # CPU RAM cache of pre-encoded T5 prompt embeddings (~2 MB per scene) so T5 (17.75 GB) loads at most ONCE per run
         self._prompt_embed_cache: Dict[str, tuple[Any, Any, Any, Any]] = {}
         self._neg_embed_cache: Dict[str, tuple[Any, Any]] = {}
+        # Remote Google Colab GPU Server URL (e.g. https://xxxx.trycloudflare.com from video_gen_colab_gpu_studio.ipynb)
+        init_url = (os.environ.get("REMOTE_GPU_URL") or settings.COMFYUI_URL or "").strip().rstrip("/")
+        self.remote_gpu_url: str = "" if init_url in ("http://127.0.0.1:8188", "http://localhost:8188") else init_url
+        self.remote_engine_label: str = ""
+        self.remote_gpu_label: str = ""
+
+    @staticmethod
+    def _normalize_remote_url(url: Optional[str]) -> str:
+        clean = (url or "").strip().rstrip("/")
+        if clean in ("http://127.0.0.1:8188", "http://localhost:8188"):
+            return ""
+        return clean
+
+    def get_active_remote_url(self, override_url: Optional[str] = None) -> str:
+        # Dynamically check .env first in case COMFYUI_URL was updated while backend is running
+        env_detected = ""
+        for env_path in (settings.DATA_DIR.parent / ".env", settings.MODELS_DIR.parent / ".env"):
+            try:
+                if env_path.exists():
+                    txt = env_path.read_text(encoding="utf-8")
+                    m = re.search(r'^COMFYUI_URL=["\']?([^"\'\r\n]+)["\']?', txt, flags=re.MULTILINE)
+                    if m:
+                        env_url = self._normalize_remote_url(m.group(1))
+                        if env_url:
+                            env_detected = env_url
+                            break
+            except Exception:
+                pass
+        cand = self._normalize_remote_url(override_url)
+        if cand:
+            # If frontend sent a stale cached URL while .env has been updated, prefer the explicit .env update if different from self.remote_gpu_url
+            if env_detected and env_detected != self.remote_gpu_url:
+                self.remote_gpu_url = env_detected
+                return env_detected
+            return cand
+        if env_detected:
+            self.remote_gpu_url = env_detected
+            return env_detected
+        active = self._normalize_remote_url(self.remote_gpu_url)
+        if active:
+            return active
+        return ""
+
+    def check_remote_gpu_status(self, url: Optional[str] = None) -> Dict[str, Any]:
+        import requests
+
+        target_url = self.get_active_remote_url(url)
+        if not target_url:
+            return {
+                "configured": False,
+                "online": False,
+                "remote_url": "",
+                "engine": "",
+                "gpu": "",
+                "message": "Local GPU Mode (No Google Colab URL configured)",
+            }
+        try:
+            with requests.Session() as session:
+                resp = session.get(f"{target_url}/health", timeout=8.0, allow_redirects=True)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    self.remote_engine_label = str(data.get("engine") or "Wan2.2 / LTX Colab GPU")
+                    self.remote_gpu_label = str(data.get("gpu") or "Colab Cloud GPU")
+                    return {
+                        "configured": True,
+                        "online": True,
+                        "remote_url": target_url,
+                        "engine": self.remote_engine_label,
+                        "gpu": self.remote_gpu_label,
+                        "message": f"Connected to {self.remote_engine_label} on {self.remote_gpu_label}",
+                    }
+                return {
+                    "configured": True,
+                    "online": False,
+                    "remote_url": target_url,
+                    "engine": "",
+                    "gpu": "",
+                    "message": f"Colab URL responded with HTTP {resp.status_code}",
+                }
+        except Exception as e:
+            return {
+                "configured": True,
+                "online": False,
+                "remote_url": target_url,
+                "engine": "",
+                "gpu": "",
+                "message": f"Colab Server unreachable ({e})",
+            }
+
+    def set_remote_gpu_url(self, url: str) -> Dict[str, Any]:
+        clean = self._normalize_remote_url(url)
+        self.remote_gpu_url = clean
+        settings.COMFYUI_URL = clean or "http://127.0.0.1:8188"
+        if not clean:
+            self.remote_engine_label = ""
+            self.remote_gpu_label = ""
+        # Persist in root .env and backend/.env for convenience
+        for env_path in (settings.DATA_DIR.parent / ".env", settings.MODELS_DIR.parent / ".env"):
+            try:
+                if env_path.exists():
+                    txt = env_path.read_text(encoding="utf-8")
+                    if re.search(r"^COMFYUI_URL=.*$", txt, flags=re.MULTILINE):
+                        txt = re.sub(
+                            r"^COMFYUI_URL=.*$",
+                            f"COMFYUI_URL={settings.COMFYUI_URL}",
+                            txt,
+                            flags=re.MULTILINE,
+                        )
+                    else:
+                        txt = txt.rstrip() + f"\nCOMFYUI_URL={settings.COMFYUI_URL}\n"
+                    env_path.write_text(txt, encoding="utf-8")
+            except Exception:
+                pass
+        return self.check_remote_gpu_status(clean)
 
     def unload_pipeline(self):
         """Frees GPU VRAM, Diffusers/Accelerate offload hooks, and Windows working-set RAM used by the video generation pipeline."""
@@ -313,7 +427,17 @@ class WanVideoStudioService:
         self,
         scenes: List[Dict[str, Any]],
         wan_model: str = "LTX-Video-2B",
+        remote_gpu_url: Optional[str] = None,
     ) -> Dict[str, Any]:
+        # If Remote Google Colab GPU is active, skip local T5 loading completely (0.0s, 0 GB local RAM/VRAM)
+        if self.get_active_remote_url(remote_gpu_url):
+            logger.info("[Remote Colab GPU] Active Colab GPU URL configured — skipping local T5 prompt pre-encoding (0 GB local RAM).")
+            return {
+                "success": True,
+                "encoded_count": 0,
+                "cached_hits": len(scenes or []),
+            }
+
         prompt_pairs: List[tuple[str, str]] = []
         for idx, sc in enumerate(scenes or []):
             scene_num = int(sc.get("scene_number") or (idx + 1))
@@ -442,7 +566,12 @@ class WanVideoStudioService:
             logger.error(f"Failed to load FP8 GPU I2V pipeline: {e}", exc_info=True)
             return False
 
-    def _resolve_model_label(self, wan_model: str) -> str:
+    def _resolve_model_label(self, wan_model: str, remote_gpu_url: Optional[str] = None) -> str:
+        active_remote = self.get_active_remote_url(remote_gpu_url)
+        if active_remote:
+            eng = self.remote_engine_label or wan_model
+            gpu = self.remote_gpu_label or "Google Colab GPU"
+            return f"{eng} • {gpu} (Remote Cloud)"
         model_up = (wan_model or "LTX-Video-2B").upper()
         if "LTX" in model_up:
             for d in LTX_MODEL_DIRS:
@@ -455,6 +584,190 @@ class WanVideoStudioService:
                 if d.exists():
                     return f"{wan_model} (models/wan2.2/I2V-Diffusers) • RTX 4060 GPU"
         return f"{wan_model} I2V • RTX 4060 Local GPU"
+
+    def _generate_remote_colab_i2v_video(
+        self,
+        pil_src: Image.Image,
+        target_video_path: Path,
+        scene_number: int,
+        total_scenes: int,
+        wan_model: str,
+        aspect_ratio: str,
+        duration_sec: int,
+        video_motion_prompt: str,
+        voiceover_speaker: str,
+        remote_gpu_url: Optional[str] = None,
+    ) -> bool:
+        """
+        Sends the Master Frame Image + Motion Prompt to the Remote Google Colab GPU Server
+        (video_gen_colab_gpu_studio.ipynb) over HTTPS, polls live step progress, and saves
+        the rendered 5-second continuous MP4 clip directly to target_video_path (0 GB local VRAM/RAM).
+        """
+        base_url = self.get_active_remote_url(remote_gpu_url)
+        if not base_url:
+            return False
+
+        import io
+        import threading
+        import requests
+
+        prompt, negative_prompt = self._build_i2v_prompts(
+            scene_number=scene_number,
+            video_motion_prompt=video_motion_prompt,
+            voiceover_speaker=voiceover_speaker,
+        )
+
+        colab_dims = {
+            "16:9": (1280, 720),
+            "9:16": (720, 1280),
+            "1:1": (960, 960),
+            "4:3": (960, 720),
+        }
+        gen_w, gen_h = colab_dims.get(aspect_ratio, (1280, 720))
+        num_frames = 81  # Full 5.0s continuous forward AI motion (Wan 2.2 native temporal window)
+        num_steps = 30   # High-detail 30 inference steps for ultra-sharp facial & lip realism on A100
+        fps = 24         # 24 FPS cinema frame rate output
+
+        img_buf = io.BytesIO()
+        pil_src.resize((gen_w, gen_h), Image.Resampling.LANCZOS).save(img_buf, format="PNG")
+        img_bytes = img_buf.getvalue()
+
+        flux_service.set_progress(
+            node="card4",
+            current_scene=scene_number,
+            total_scenes=total_scenes,
+            step=1,
+            total_steps=num_steps,
+            message=f"Scene {scene_number}/{total_scenes}: Uploading Master Frame to Colab GPU ({wan_model})...",
+        )
+
+        stop_poll = threading.Event()
+
+        def _poll_colab_health():
+            with requests.Session() as poll_session:
+                while not stop_poll.wait(1.0):
+                    try:
+                        r = poll_session.get(f"{base_url}/health", timeout=5.0, allow_redirects=True)
+                        if r.status_code == 200:
+                            hdata = r.json()
+                            self.remote_engine_label = str(hdata.get("engine") or wan_model)
+                            self.remote_gpu_label = str(hdata.get("gpu") or "Colab GPU")
+                            job = hdata.get("job") or {}
+                            step_val = int(job.get("step") or 0)
+                            tot_val = max(int(job.get("total_steps") or num_steps), 1)
+                            if step_val > 0:
+                                pct = int((step_val / tot_val) * 100)
+                                flux_service.set_progress(
+                                    node="card4",
+                                    current_scene=scene_number,
+                                    total_scenes=total_scenes,
+                                    step=min(step_val, tot_val),
+                                    total_steps=tot_val,
+                                    message=f"Scene {scene_number}/{total_scenes}: Colab GPU {self.remote_engine_label} ({pct}% • Step {step_val}/{tot_val})",
+                                )
+                    except Exception:
+                        pass
+
+        poll_thread = threading.Thread(target=_poll_colab_health, daemon=True)
+        poll_thread.start()
+
+        try:
+            logger.info(f"[Remote Colab GPU] Sending Scene {scene_number}/{total_scenes} to {base_url}/api/v1/generate-i2v ({gen_w}x{gen_h}, {num_frames} frames)...")
+            with requests.Session() as session:
+                resp = session.post(
+                    f"{base_url}/api/v1/generate-i2v",
+                    files={"image": (f"scene_{scene_number}_master.png", img_bytes, "image/png")},
+                    data={
+                        "prompt": prompt,
+                        "negative_prompt": negative_prompt,
+                        "width": str(gen_w),
+                        "height": str(gen_h),
+                        "num_frames": str(num_frames),
+                        "steps": str(num_steps),
+                        "fps": str(fps),
+                        "wan_model": wan_model,
+                        "async_job": "1",
+                    },
+                    timeout=900.0,
+                    allow_redirects=True,
+                )
+
+                content_type = (resp.headers.get("content-type") or "").lower()
+
+                # Async Job Mode (prevents Cloudflare 100s Error 524 Timeout!)
+                if resp.status_code in (200, 202) and "application/json" in content_type:
+                    stop_poll.set()  # Main loop will poll /health directly
+                    jdata = resp.json()
+                    job_id = str(jdata.get("job_id") or "")
+                    logger.info(f"[Remote Colab GPU] Async job started (job_id={job_id}); polling /health until completion...")
+                    poll_start = time.time()
+                    while time.time() - poll_start < 1800.0:
+                        time.sleep(2.0)
+                        try:
+                            hr = session.get(
+                                f"{base_url}/health",
+                                params={"job_id": job_id} if job_id else None,
+                                timeout=10.0,
+                                allow_redirects=True,
+                            )
+                            if hr.status_code != 200:
+                                continue
+                            hdata = hr.json()
+                            self.remote_engine_label = str(hdata.get("engine") or wan_model)
+                            self.remote_gpu_label = str(hdata.get("gpu") or "Colab GPU")
+                            job = hdata.get("job") or {}
+                            j_status = str(job.get("status") or "")
+                            step_val = int(job.get("step") or 0)
+                            tot_val = max(int(job.get("total_steps") or num_steps), 1)
+                            if step_val > 0:
+                                pct = int((step_val / tot_val) * 100)
+                                flux_service.set_progress(
+                                    node="card4",
+                                    current_scene=scene_number,
+                                    total_scenes=total_scenes,
+                                    step=min(step_val, tot_val),
+                                    total_steps=tot_val,
+                                    message=f"Scene {scene_number}/{total_scenes}: Colab GPU {self.remote_engine_label} ({pct}% • Step {step_val}/{tot_val})",
+                                )
+                            if j_status == "completed":
+                                dl_resp = session.get(
+                                    f"{base_url}/api/v1/download-video",
+                                    params={"job_id": job_id} if job_id else None,
+                                    timeout=120.0,
+                                    allow_redirects=True,
+                                )
+                                if dl_resp.status_code == 200 and len(dl_resp.content) > 1024:
+                                    target_video_path.parent.mkdir(parents=True, exist_ok=True)
+                                    target_video_path.write_bytes(dl_resp.content)
+                                    logger.info(
+                                        f"[Remote Colab GPU] Scene {scene_number}/{total_scenes} MP4 downloaded to {target_video_path} ({len(dl_resp.content) / (1024*1024):.2f} MB)"
+                                    )
+                                    return True
+                                logger.error(f"[Remote Colab GPU] Download failed HTTP {dl_resp.status_code}")
+                                return False
+                            if j_status == "error":
+                                logger.error(f"[Remote Colab GPU] Colab GPU reported job error: {job.get('error')}")
+                                return False
+                        except Exception as poll_err:
+                            logger.debug(f"[Remote Colab GPU] Poll retry: {poll_err}")
+                    logger.error(f"[Remote Colab GPU] Timed out waiting for async job {job_id}")
+                    return False
+
+                if resp.status_code != 200 or len(resp.content) < 1024:
+                    logger.error(f"[Remote Colab GPU] HTTP {resp.status_code}: {resp.text[:300]}")
+                    return False
+
+                target_video_path.parent.mkdir(parents=True, exist_ok=True)
+                target_video_path.write_bytes(resp.content)
+                logger.info(
+                    f"[Remote Colab GPU] Scene {scene_number}/{total_scenes} MP4 saved to {target_video_path} ({len(resp.content) / (1024*1024):.2f} MB)"
+                )
+                return True
+        except Exception as e:
+            logger.error(f"[Remote Colab GPU] Failed to generate Scene {scene_number} on Colab ({e})", exc_info=True)
+            return False
+        finally:
+            stop_poll.set()
 
     def _resolve_source_image_path(
         self,
@@ -684,20 +997,11 @@ class WanVideoStudioService:
                 sharp_bgr = cv2.addWeighted(up_bgr, 1.16, gaussian, -0.16, 0)
                 upscaled_bgr_frames.append(sharp_bgr)
 
-            # Apply Two-Stage Syllable Micro-Articulation + Temporal Background/Microphone Stabilization
-            upscaled_bgr_frames = self._refine_and_stabilize_ai_frames(
-                ai_frames=upscaled_bgr_frames,
-                master_bgr=master_bgr,
-                scene_number=scene_number,
-                vo_text=voiceover_english,
-                fps=24,
-            )
-
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
             logger.info(
-                f"Scene {scene_number}: Generated & stabilized {len(upscaled_bgr_frames)} GPU I2V frames via {wan_model}"
+                f"Scene {scene_number}: Generated {len(upscaled_bgr_frames)} pure 3D AI GPU I2V frames via {wan_model}"
             )
             return upscaled_bgr_frames
         except Exception as e:
@@ -861,11 +1165,14 @@ class WanVideoStudioService:
         video_motion_prompt: str,
         voiceover_speaker: str,
         voiceover_sinhala: str,
-        voiceover_english: str
+        voiceover_english: str,
+        remote_gpu_url: Optional[str] = None,
     ) -> bool:
         """
-        Synthesizes a 24fps H.264 MP4 video clip driven by Card 3's Master Frame Image
-        and Card 4's Scene Motion & Voice-Over Script using Local GPU I2V (LTX-Video / Wan 2.2).
+        Synthesizes an H.264 MP4 video clip driven by Card 3's Master Frame Image
+        and Card 4's Scene Motion & Voice-Over Script using either:
+          1. Remote Google Colab GPU Server (Wan 2.2 14B / LTX-13B via video_gen_colab_gpu_studio.ipynb) when configured, or
+          2. Local GPU I2V (LTX-Video / Wan 2.2).
         """
         dimensions = {
             "1:1": (1024, 1024),
@@ -885,7 +1192,25 @@ class WanVideoStudioService:
             pil_src = Image.new("RGB", (out_w, out_h), (38, 25, 20))
             base_bgr = np.full((out_h, out_w, 3), (20, 25, 38), dtype=np.uint8)
 
-        # 1. Run Real GPU Image-to-Video Diffusion Pipeline (LTX-Video / Wan 2.2)
+        # 0. Priority 1: Remote Google Colab GPU Server (0 GB local VRAM/RAM, full 5s forward AI clip)
+        if self.get_active_remote_url(remote_gpu_url):
+            ok_remote = self._generate_remote_colab_i2v_video(
+                pil_src=pil_src,
+                target_video_path=target_video_path,
+                scene_number=scene_number,
+                total_scenes=total_scenes,
+                wan_model=wan_model,
+                aspect_ratio=aspect_ratio,
+                duration_sec=duration_sec,
+                video_motion_prompt=video_motion_prompt,
+                voiceover_speaker=voiceover_speaker,
+                remote_gpu_url=remote_gpu_url,
+            )
+            if ok_remote and target_video_path.exists() and target_video_path.stat().st_size > 1024:
+                return True
+            logger.warning(f"Scene {scene_number}: Remote Colab GPU call did not succeed; falling back to local pipeline...")
+
+        # 1. Priority 2: Local GPU Image-to-Video Diffusion Pipeline (LTX-Video / Wan 2.2)
         ai_bgr_frames = self._generate_gpu_i2v_frames(
             pil_src=pil_src,
             scene_number=scene_number,
@@ -933,7 +1258,6 @@ class WanVideoStudioService:
         for f_idx in range(total_frames):
             if ai_bgr_frames and num_ai > 1:
                 if f_idx < num_ai:
-                    # Direct 1:1 native 24fps forward AI frame (121 AI frames covers all 120 frames of a 5s clip!)
                     frame = ai_bgr_frames[f_idx].copy()
                 else:
                     cycle_len = 2 * (num_ai - 1)
@@ -950,16 +1274,15 @@ class WanVideoStudioService:
                     grid_x=grid_x,
                     grid_y=grid_y,
                 )
-
-            # Add Voice-Over subtitle bar
-            frame = self._render_cinema_subtitle_overlay(
-                frame_bgr=frame,
-                speaker=voiceover_speaker,
-                vo_english=voiceover_english,
-                vo_sinhala=voiceover_sinhala,
-                scene_number=scene_number,
-                wan_model=wan_model
-            )
+                # Only add subtitle overlay on CPU fallback frames; keep real AI frames 100% clean
+                frame = self._render_cinema_subtitle_overlay(
+                    frame_bgr=frame,
+                    speaker=voiceover_speaker,
+                    vo_english=voiceover_english,
+                    vo_sinhala=voiceover_sinhala,
+                    scene_number=scene_number,
+                    wan_model=wan_model
+                )
 
             writer.write(frame)
 
@@ -972,8 +1295,11 @@ class WanVideoStudioService:
         wan_model: str = "Wan2.2-TI2V-5B",
         aspect_ratio: str = "16:9",
         scenes: Optional[List[Dict[str, Any]]] = None,
-        frames: Optional[List[Dict[str, Any]]] = None
+        frames: Optional[List[Dict[str, Any]]] = None,
+        remote_gpu_url: Optional[str] = None,
     ) -> GenerateVideosResponse:
+        if remote_gpu_url is not None and remote_gpu_url.strip():
+            self.remote_gpu_url = self._normalize_remote_url(remote_gpu_url)
         scenes = scenes or []
         frames = frames or []
         video_run_dir = settings.VIDEOS_DIR / run_id
@@ -982,7 +1308,7 @@ class WanVideoStudioService:
         videos_result: List[VideoClipItem] = []
         total_scenes = max(len(scenes), len(frames), 1)
 
-        # Stage 2A: Pre-encode ALL scene prompts in a single isolated FP8 T5 pass before loading LTX Video GPU engine
+        # Stage 2A: Pre-encode ALL scene prompts in a single isolated FP8 T5 pass (skipped automatically if Colab GPU is active)
         batch_prompt_items: List[Dict[str, Any]] = []
         for idx in range(total_scenes):
             sc_i = scenes[idx] if idx < len(scenes) else {}
@@ -998,7 +1324,7 @@ class WanVideoStudioService:
                 "video_motion_prompt": vmp_i,
                 "voiceover_speaker": spk_i,
             })
-        await self.preencode_scene_prompts(scenes=batch_prompt_items, wan_model=wan_model)
+        await self.preencode_scene_prompts(scenes=batch_prompt_items, wan_model=wan_model, remote_gpu_url=remote_gpu_url)
 
         for idx in range(total_scenes):
             sc = scenes[idx] if idx < len(scenes) else {}
@@ -1043,6 +1369,7 @@ class WanVideoStudioService:
                 voiceover_speaker=vo_speaker,
                 voiceover_sinhala=vo_sinhala,
                 voiceover_english=vo_english,
+                remote_gpu_url=remote_gpu_url,
             )
 
             cache_ts = int(time.time() * 1000)
@@ -1063,7 +1390,7 @@ class WanVideoStudioService:
                     voiceover_english=vo_english,
                     voice_tone=vo_tone,
                     sfx_cue=sfx_cue,
-                    engine_used=self._resolve_model_label(wan_model)
+                    engine_used=self._resolve_model_label(wan_model, remote_gpu_url=remote_gpu_url)
                 )
             )
 
@@ -1091,8 +1418,11 @@ class WanVideoStudioService:
         voiceover_sinhala: str = "",
         voiceover_english: str = "",
         voice_tone: str = "Warm cinematic tone",
-        sfx_cue: str = ""
+        sfx_cue: str = "",
+        remote_gpu_url: Optional[str] = None,
     ) -> VideoClipItem:
+        if remote_gpu_url is not None and remote_gpu_url.strip():
+            self.remote_gpu_url = self._normalize_remote_url(remote_gpu_url)
         video_run_dir = settings.VIDEOS_DIR / run_id
         video_run_dir.mkdir(parents=True, exist_ok=True)
         video_filename = f"scene_{scene_number}_wan22.mp4"
@@ -1121,6 +1451,7 @@ class WanVideoStudioService:
             voiceover_speaker=voiceover_speaker,
             voiceover_sinhala=voiceover_sinhala,
             voiceover_english=voiceover_english,
+            remote_gpu_url=remote_gpu_url,
         )
 
         flux_service.reset_progress()
@@ -1144,7 +1475,7 @@ class WanVideoStudioService:
             voiceover_english=voiceover_english,
             voice_tone=voice_tone,
             sfx_cue=sfx_cue,
-            engine_used=self._resolve_model_label(wan_model)
+            engine_used=self._resolve_model_label(wan_model, remote_gpu_url=remote_gpu_url)
         )
 
 

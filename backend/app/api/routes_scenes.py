@@ -13,10 +13,13 @@ from app.schemas.schemas import (
     VideoClipItem,
     PreencodeVideoPromptsRequest,
     PreencodeVideoPromptsResponse,
+    RemoteColabConfigRequest,
+    RemoteColabStatusResponse,
 )
 from app.services.scene_planner import scene_planner_agent
 from app.services.flux_service import flux_service
 from app.services.wan_video_service import wan_video_service
+import asyncio
 
 router = APIRouter(prefix="/scenes", tags=["Film Agent Scene Planner & FLUX Studio"])
 
@@ -106,7 +109,8 @@ async def generate_videos_endpoint(payload: GenerateVideosRequest):
             wan_model=payload.wan_model,
             aspect_ratio=payload.aspect_ratio,
             scenes=payload.scenes,
-            frames=payload.frames
+            frames=payload.frames,
+            remote_gpu_url=payload.remote_gpu_url,
         )
         return result
     except Exception as e:
@@ -127,6 +131,7 @@ async def preencode_video_prompts_endpoint(payload: PreencodeVideoPromptsRequest
         result = await wan_video_service.preencode_scene_prompts(
             scenes=scene_dicts,
             wan_model=payload.wan_model,
+            remote_gpu_url=payload.remote_gpu_url,
         )
         return result
     except Exception as e:
@@ -152,10 +157,35 @@ async def regenerate_video_endpoint(payload: RegenerateSingleVideoRequest):
             voiceover_sinhala=payload.voiceover_sinhala,
             voiceover_english=payload.voiceover_english,
             voice_tone=payload.voice_tone,
-            sfx_cue=payload.sfx_cue
+            sfx_cue=payload.sfx_cue,
+            remote_gpu_url=payload.remote_gpu_url,
         )
         return updated_video
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/remote-gpu-status", response_model=RemoteColabStatusResponse)
+async def get_remote_gpu_status_endpoint():
+    """
+    Checks whether a Remote Google Colab GPU Server (video_gen_colab_gpu_studio.ipynb) is configured and online.
+    """
+    try:
+        status = await asyncio.to_thread(wan_video_service.check_remote_gpu_status)
+        return RemoteColabStatusResponse(**status)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/remote-gpu-config", response_model=RemoteColabStatusResponse)
+async def set_remote_gpu_config_endpoint(payload: RemoteColabConfigRequest):
+    """
+    Updates and tests the Remote Google Colab GPU Server URL (e.g. https://xxxx.trycloudflare.com).
+    Pass an empty string to switch back to Local GPU mode.
+    """
+    try:
+        status = await asyncio.to_thread(wan_video_service.set_remote_gpu_url, payload.remote_url)
+        return RemoteColabStatusResponse(**status)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 

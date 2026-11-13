@@ -59,45 +59,63 @@ const IMAGE_MODEL_OPTIONS = [
 
 export const VIDEO_MODEL_OPTIONS = [
   {
-    id: 'LTX-Video-2B',
-    title: 'LTX-Video-2B Distilled (models/ltx)',
-    badge: 'LOCAL LTX 2B',
-    badgeColor: '#f43f5e',
-    path: 'backend/models/models/ltx',
-    desc: 'Lightricks LTX-Video 2B v0.9.8 Distilled in models/models/ltx. Ultra-fast Local GPU Image-to-Video synthesis.',
+    id: 'Wan2.2-I2V-A14B',
+    title: 'Wan2.2-I2V-A14B (Colab A100 / Drive AI_Models)',
+    badge: 'WAN 2.2 14B I2V',
+    badgeColor: '#10b981',
+    path: 'Dilshan/AI_Models/Wan2.2-I2V-A14B-Diffusers',
+    desc: 'Primary 14B MoE Image-to-Video Cinema Engine on Google Colab GPU for maximum facial & lip realism.',
+  },
+  {
+    id: 'Wan2.2-T2V-A14B',
+    title: 'Wan2.2-T2V-A14B (Colab A100 / Drive AI_Models)',
+    badge: 'WAN 2.2 14B T2V',
+    badgeColor: '#f59e0b',
+    path: 'Dilshan/AI_Models/Wan2.2-T2V-A14B-Diffusers',
+    desc: 'Full Wan 2.2 A14B Text-to-Video Diffusers pipeline in Google Drive AI_Models.',
   },
   {
     id: 'LTX-Video-13B',
-    title: 'LTX-Video-13B FP8 (models/ltx)',
-    badge: 'LTX 13B FP8',
+    title: 'LTX-2.5 / LTX-Video-13B (Drive AI_Models / Local)',
+    badge: 'LTX 2.5 / 13B',
     badgeColor: '#ec4899',
-    path: 'backend/models/models/ltx/ltxv-13b-0.9.8-distilled-fp8.safetensors',
-    desc: 'High-detail 13B Distilled FP8 LTX-Video checkpoint with spatial & temporal upscalers.',
+    path: 'Dilshan/AI_Models/LTX-2.5',
+    desc: 'High-detail LTX-2.5 / 13B Distilled FP8 Video checkpoint with spatial & temporal upscalers.',
   },
   {
-    id: 'Wan2.2-I2V-A14B',
-    title: 'Wan2.2-I2V-A14B (models/wan2.2)',
-    badge: 'WAN 2.2 14B',
-    badgeColor: '#f59e0b',
-    path: 'backend/models/models/wan2.2/Wan2.2-I2V-A14B-Diffusers',
-    desc: 'Full Wan 2.2 A14B Image-to-Video Diffusers pipeline in models/models/wan2.2 for cinema motion.',
-  },
-  {
-    id: 'Wan2.2-TI2V-5B',
-    title: 'Wan2.2-TI2V-5B (Fast Studio I2V)',
-    badge: 'WAN 2.2 5B',
-    badgeColor: '#10b981',
-    path: 'backend/models/models/wan2.2',
-    desc: 'Fast 5B Text/Image-to-Video engine optimized for 8GB VRAM RTX 4060.',
+    id: 'LTX-Video-2B',
+    title: 'LTX-Video-2B Distilled (Local Fallback)',
+    badge: 'LOCAL LTX 2B',
+    badgeColor: '#f43f5e',
+    path: 'backend/models/models/ltx',
+    desc: 'Lightricks LTX-Video 2B v0.9.8 Distilled in models/models/ltx for local GPU fallback.',
   },
 ];
 
 export const NodeModelSelector = memo(({ data, isConnectable }) => {
   const selectedModel = data.fluxModel || 'Qwen-Image-2.1';
-  const selectedVideoModel = data.wanModel || 'LTX-Video-2B';
+  const selectedVideoModel = data.wanModel || 'Wan2.2-I2V-A14B';
   const aspectRatio = data.aspectRatio || '16:9';
   const activeOption = IMAGE_MODEL_OPTIONS.find((m) => m.id === selectedModel) || IMAGE_MODEL_OPTIONS[0];
   const activeVideoOption = VIDEO_MODEL_OPTIONS.find((m) => m.id === selectedVideoModel) || VIDEO_MODEL_OPTIONS[0];
+  const [colabInput, setColabInput] = useState(data.remoteGpuUrl || '');
+  const [isTestingColab, setIsTestingColab] = useState(false);
+
+  React.useEffect(() => {
+    if (data.remoteGpuUrl !== undefined && data.remoteGpuUrl !== colabInput) {
+      setColabInput(data.remoteGpuUrl || '');
+    }
+  }, [data.remoteGpuUrl]);
+
+  const handleSaveColabUrl = async (urlToSave) => {
+    if (!data.onUpdateRemoteGpuUrl) return;
+    setIsTestingColab(true);
+    try {
+      await data.onUpdateRemoteGpuUrl(urlToSave);
+    } finally {
+      setIsTestingColab(false);
+    }
+  };
 
   return (
     <div className={`studio-node model-selector-node accent-sky ${data.isActive ? 'active-processing' : ''}`}>
@@ -247,6 +265,79 @@ export const NodeModelSelector = memo(({ data, isConnectable }) => {
           </div>
         </div>
 
+        {/* Google Colab Remote GPU Tunnel URL (video_gen_colab_gpu_studio.ipynb) */}
+        <div style={{ paddingTop: '0.4rem', borderTop: '1px solid var(--border-subtle)', display: 'flex', flexDirection: 'column', gap: '0.32rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '0.67rem', color: '#34d399', fontWeight: 700, textTransform: 'uppercase' }}>
+              ☁️ 3. Google Colab Video GPU URL (Optional):
+            </span>
+            <span
+              style={{
+                fontSize: '0.56rem',
+                fontWeight: 700,
+                padding: '1px 6px',
+                borderRadius: '4px',
+                background: data.remoteGpuOnline ? 'rgba(16, 185, 129, 0.16)' : 'rgba(148, 163, 184, 0.14)',
+                color: data.remoteGpuOnline ? '#34d399' : '#94a3b8',
+                border: `1px solid ${data.remoteGpuOnline ? 'rgba(16, 185, 129, 0.45)' : 'rgba(148, 163, 184, 0.3)'}`,
+              }}
+            >
+              {data.remoteGpuOnline ? `🟢 COLAB ONLINE (${data.remoteGpuDevice || 'GPU'})` : '⚪ LOCAL GPU MODE'}
+            </span>
+          </div>
+
+          <div style={{ display: 'flex', gap: '0.3rem', alignItems: 'center' }}>
+            <input
+              type="text"
+              className="nodrag"
+              value={colabInput}
+              onChange={(e) => setColabInput(e.target.value)}
+              placeholder="https://xxxx.trycloudflare.com"
+              style={{
+                flex: 1,
+                fontSize: '0.64rem',
+                padding: '5px 8px',
+                borderRadius: '6px',
+                border: '1px solid rgba(56, 189, 248, 0.35)',
+                background: 'rgba(15, 23, 42, 0.85)',
+                color: '#f8fafc',
+                fontFamily: 'var(--font-mono)',
+              }}
+            />
+            <button
+              type="button"
+              className="selector-chip nodrag"
+              disabled={isTestingColab}
+              onClick={() => handleSaveColabUrl(colabInput.trim())}
+              style={{
+                fontSize: '0.62rem',
+                padding: '5px 9px',
+                background: 'rgba(16, 185, 129, 0.2)',
+                borderColor: 'rgba(16, 185, 129, 0.55)',
+                color: '#6ee7b7',
+                fontWeight: 700,
+              }}
+            >
+              {isTestingColab ? '...' : 'Connect'}
+            </button>
+            {colabInput && (
+              <button
+                type="button"
+                className="selector-chip nodrag"
+                disabled={isTestingColab}
+                onClick={() => {
+                  setColabInput('');
+                  handleSaveColabUrl('');
+                }}
+                style={{ fontSize: '0.6rem', padding: '5px 7px', color: '#fda4af' }}
+                title="Clear Colab URL & use Local GPU"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* Active Hardware & Model Summary Box */}
         <div style={{ background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.3)', borderRadius: '7px', padding: '0.45rem 0.6rem', display: 'flex', flexDirection: 'column', gap: '3px', fontSize: '0.64rem' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -257,7 +348,10 @@ export const NodeModelSelector = memo(({ data, isConnectable }) => {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ color: '#cbd2de' }}>
-              Video Engine: <strong style={{ color: '#fda4af' }}>{activeVideoOption.id}</strong>
+              Video Engine:{' '}
+              <strong style={{ color: '#fda4af' }}>
+                {data.remoteGpuOnline ? `${data.remoteGpuEngine || activeVideoOption.id} (Colab)` : activeVideoOption.id}
+              </strong>
             </span>
             <span style={{ color: '#fda4af', fontWeight: 700 }}>➔ Card 4.K</span>
           </div>
@@ -1815,7 +1909,7 @@ export const NodeSceneStudio = memo(({ data, isConnectable }) => {
 export const NodeSceneVideo = memo(({ data, isConnectable }) => {
   const sceneIdx = data.sceneIndex ?? 0;
   const sceneNum = data.sceneNumber || sceneIdx + 1;
-  const wanModel = data.wanModel || 'LTX-Video-2B';
+  const wanModel = data.wanModel || 'Wan2.2-I2V-A14B';
   const frame = data.frame || null;
   const sceneScript = data.sceneScript ? enrichSceneWithVideoAndVO(data.sceneScript, sceneIdx, false) : null;
   const videoClip = data.videoClip || null;
@@ -1870,7 +1964,7 @@ export const NodeSceneVideo = memo(({ data, isConnectable }) => {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: '0.35rem', borderBottom: '1px solid var(--border-subtle)' }}>
           <span style={{ fontSize: '0.67rem', color: 'var(--text-dim)', fontWeight: 600 }}>Video Model:</span>
           <div className="selector-chip-group">
-            {['LTX-Video-2B', 'LTX-Video-13B', 'Wan2.2-I2V-A14B', 'Wan2.2-TI2V-5B'].map((wm) => (
+            {['Wan2.2-I2V-A14B', 'Wan2.2-T2V-A14B', 'LTX-Video-13B', 'LTX-Video-2B'].map((wm) => (
               <button
                 key={wm}
                 type="button"

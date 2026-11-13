@@ -116,6 +116,7 @@ class GenerateVideosRequest(BaseModel):
     run_id: str
     wan_model: str = "Wan2.2-TI2V-5B"
     aspect_ratio: str = "16:9"
+    remote_gpu_url: Optional[str] = None
     scenes: List[Dict[str, Any]]
     frames: List[Dict[str, Any]]
 
@@ -130,6 +131,7 @@ class RegenerateSingleVideoRequest(BaseModel):
     total_scenes: Optional[int] = 1
     wan_model: str = "Wan2.2-TI2V-5B"
     aspect_ratio: str = "16:9"
+    remote_gpu_url: Optional[str] = None
     source_image_url: Optional[str] = None
     source_image_path: Optional[str] = None
     video_motion_prompt: str = ""
@@ -148,12 +150,25 @@ class PreencodeScenePromptItem(BaseModel):
 class PreencodeVideoPromptsRequest(BaseModel):
     run_id: str = ""
     wan_model: str = "LTX-Video-2B"
+    remote_gpu_url: Optional[str] = None
     scenes: List[PreencodeScenePromptItem]
 
 class PreencodeVideoPromptsResponse(BaseModel):
     success: bool = True
     encoded_count: int = 0
     cached_hits: int = 0
+
+class RemoteColabConfigRequest(BaseModel):
+    remote_url: str = Field(default="", description="Public Cloudflare / Ngrok URL from video_gen_colab_gpu_studio.ipynb")
+
+class RemoteColabStatusResponse(BaseModel):
+    configured: bool = False
+    online: bool = False
+    remote_url: str = ""
+    engine: str = ""
+    gpu: str = ""
+    message: str = ""
+
 
 
 

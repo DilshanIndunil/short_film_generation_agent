@@ -75,7 +75,7 @@ function buildSceneStudioNode(
   fluxModel = 'Qwen-Image-2.1',
   aspectRatio = '16:9',
   existingNode = null,
-  wanModel = 'LTX-Video-2B'
+  wanModel = 'Wan2.2-I2V-A14B'
 ) {
   const id = `scene-${sceneIdx + 1}`;
   return {
@@ -98,7 +98,7 @@ function buildSceneStudioNode(
 function buildSceneVideoNode(
   sceneIdx,
   totalScenes,
-  wanModel = 'LTX-Video-2B',
+  wanModel = 'Wan2.2-I2V-A14B',
   aspectRatio = '16:9',
   existingNode = null
 ) {
@@ -189,7 +189,7 @@ const DEFAULT_NODES = [
     position: { x: 20, y: 210 },
     data: {
       fluxModel: 'Qwen-Image-2.1',
-      wanModel: 'LTX-Video-2B',
+      wanModel: 'Wan2.2-I2V-A14B',
       aspectRatio: '16:9',
     },
   },
@@ -199,7 +199,7 @@ const DEFAULT_NODES = [
     position: { x: 455, y: 210 },
     data: {
       fluxModel: 'Qwen-Image-2.1',
-      wanModel: 'LTX-Video-2B',
+      wanModel: 'Wan2.2-I2V-A14B',
       aspectRatio: '16:9',
       characters: ['female'],
       extractedSceneCount: 0,
@@ -219,14 +219,14 @@ const DEFAULT_NODES = [
     position: { x: 910, y: 210 },
     data: {
       fluxModel: 'Qwen-Image-2.1',
-      wanModel: 'LTX-Video-2B',
+      wanModel: 'Wan2.2-I2V-A14B',
       aspectRatio: '16:9',
       storyTitle: '',
       optimizedScenes: [],
     },
   },
-  buildSceneStudioNode(0, 1, 'Qwen-Image-2.1', '16:9', null, 'LTX-Video-2B'),
-  buildSceneVideoNode(0, 1, 'LTX-Video-2B', '16:9'),
+  buildSceneStudioNode(0, 1, 'Qwen-Image-2.1', '16:9', null, 'Wan2.2-I2V-A14B'),
+  buildSceneVideoNode(0, 1, 'Wan2.2-I2V-A14B', '16:9'),
 ];
 
 const DEFAULT_EDGES = buildEdgesForSceneCount(1);
@@ -304,7 +304,33 @@ export default function App() {
         }
       })
       .catch(() => { });
-  }, [fetchHistoryList]);
+    fetch('/api/v1/scenes/remote-gpu-status')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((rst) => {
+        if (rst) {
+          setNodes((nds) =>
+            nds.map((n) =>
+              n.id === '0'
+                ? {
+                  ...n,
+                  data: {
+                    ...n.data,
+                    remoteGpuUrl: rst.remote_url || '',
+                    remoteGpuOnline: Boolean(rst.online),
+                    remoteGpuEngine: rst.engine || '',
+                    remoteGpuDevice: rst.gpu || '',
+                  },
+                }
+                : n
+            )
+          );
+          if (rst.online) {
+            addLog(`[Colab Remote GPU] Connected to ${rst.engine} on ${rst.gpu} (${rst.remote_url})`, 'success');
+          }
+        }
+      })
+      .catch(() => { });
+  }, [fetchHistoryList, setNodes, addLog]);
 
   const onNodeDragStop = useCallback(
     (_, node) => {
@@ -355,7 +381,7 @@ export default function App() {
     setNodes((nds) => {
       const modelNode = nds.find((n) => n.id === '0');
       const currentModel = modelNode?.data?.fluxModel || 'Qwen-Image-2.1';
-      const currentWanModel = modelNode?.data?.wanModel || 'LTX-Video-2B';
+      const currentWanModel = modelNode?.data?.wanModel || 'Wan2.2-I2V-A14B';
       const currentRatio = modelNode?.data?.aspectRatio || '16:9';
 
       return [
@@ -364,6 +390,7 @@ export default function App() {
           type: 'modelSelectorNode',
           position: nds.find((n) => n.id === '0')?.position || { x: 20, y: 210 },
           data: {
+            ...(modelNode?.data || {}),
             fluxModel: currentModel,
             wanModel: currentWanModel,
             aspectRatio: currentRatio,
@@ -446,7 +473,7 @@ export default function App() {
           const targetModel = keepCurrentModel
             ? modelNode?.data?.fluxModel || 'Qwen-Image-2.1'
             : data.flux_model || modelNode?.data?.fluxModel || 'Qwen-Image-2.1';
-          const targetWanModel = modelNode?.data?.wanModel || 'LTX-Video-2B';
+          const targetWanModel = modelNode?.data?.wanModel || 'Wan2.2-I2V-A14B';
           const targetRatio = data.aspect_ratio || modelNode?.data?.aspectRatio || '16:9';
 
           const baseNodes = [
@@ -539,7 +566,7 @@ export default function App() {
 
     const aspectRatio = promptNode?.data?.aspectRatio || '16:9';
     const fluxModel = promptNode?.data?.fluxModel || 'Qwen-Image-2.1';
-    const wanModel = modelNode?.data?.wanModel || 'LTX-Video-2B';
+    const wanModel = modelNode?.data?.wanModel || 'Wan2.2-I2V-A14B';
     const characters = selectedCharactersRef.current || promptNode?.data?.characters || ['female'];
 
     setSelectedRunId(null);
@@ -902,17 +929,18 @@ export default function App() {
       const sceneNode = nodesRef.current.find((n) => n.id === `scene-${sceneNum}`);
       const videoNode = nodesRef.current.find((n) => n.id === `video-${sceneNum}`);
 
-      const wanModel = videoNode?.data?.wanModel || modelNode?.data?.wanModel || 'LTX-Video-2B';
+      const wanModel = videoNode?.data?.wanModel || modelNode?.data?.wanModel || 'Wan2.2-I2V-A14B';
       const aspectRatio = promptNode?.data?.aspectRatio || '16:9';
       const runId = sceneNode?.data?.runId || videoNode?.data?.runId || `run_${Date.now()}_flux`;
       const frame = sceneNode?.data?.frame || videoNode?.data?.frame || null;
+      const totalScenesCount = nodesRef.current.filter((n) => n.id.startsWith('scene-')).length || 1;
       const sceneScript =
         sceneNode?.data?.sceneScript ||
         videoNode?.data?.sceneScript ||
         (plannerNode?.data?.optimizedScenes || [])[sceneIdx] ||
         {};
 
-      if (!frame || (!frame.imageUrl && !frame.filePath)) {
+      if (!frame || (!frame.imageUrl && !frame.file_path && !frame.filePath)) {
         addLog(`[4.${sceneNum} Video Studio] Master Frame not generated yet in 3.${sceneNum}! Please generate the Master Frame first.`, 'error');
         return;
       }
@@ -928,6 +956,7 @@ export default function App() {
       addLog(`[3.${sceneNum} ➔ 4.${sceneNum} Video Studio] Synthesizing Scene ${sceneNum} Video Clip with ${wanModel}...`, 'info');
 
       if (progressPollRef.current) clearInterval(progressPollRef.current);
+      let lastSingleVidStep = -1;
       progressPollRef.current = setInterval(async () => {
         try {
           const pRes = await fetch('/api/v1/generate/progress');
@@ -940,10 +969,14 @@ export default function App() {
                   n.id === `video-${sceneNum}` ? { ...n, data: { ...n.data, liveProgress: pData } } : n
                 )
               );
+              if (pData.node === 'card4' && pData.step !== lastSingleVidStep) {
+                lastSingleVidStep = pData.step;
+                addLog(`[Video Engine] ${pData.message}`, pData.step === pData.total_steps ? 'success' : 'info');
+              }
             }
           }
         } catch { }
-      }, 500);
+      }, 1000);
 
       try {
         const res = await fetch('/api/v1/scenes/regenerate-video', {
@@ -952,10 +985,12 @@ export default function App() {
           body: JSON.stringify({
             run_id: runId,
             scene_number: sceneNum,
+            total_scenes: totalScenesCount,
             wan_model: wanModel,
             aspect_ratio: aspectRatio,
-            source_image_url: frame.imageUrl || null,
-            source_image_path: frame.filePath || null,
+            remote_gpu_url: modelNode?.data?.remoteGpuUrl || null,
+            source_image_url: frame.imageUrl || frame.url || null,
+            source_image_path: frame.file_path || frame.filePath || null,
             video_motion_prompt: sceneScript.video_motion_prompt || sceneScript.raw_prompt || '',
             camera_motion: sceneScript.camera_motion || sceneScript.camera || '',
             voiceover_speaker: sceneScript.voiceover_speaker || 'Narrator',
@@ -1037,7 +1072,7 @@ export default function App() {
       const promptNode = nodesRef.current.find((n) => n.id === '1');
       const plannerNode = nodesRef.current.find((n) => n.id === '2');
 
-      const wanModel = modelNode?.data?.wanModel || 'LTX-Video-2B';
+      const wanModel = modelNode?.data?.wanModel || 'Wan2.2-I2V-A14B';
       const aspectRatio = promptNode?.data?.aspectRatio || '16:9';
 
       const sceneNodes = nodesRef.current
@@ -1067,6 +1102,7 @@ export default function App() {
       addLog(`[3.1..3.${scenesPayload.length} ➔ 4.1..4.${scenesPayload.length}] Synthesizing ${scenesPayload.length} Scene Video Clip(s) one-by-one using ${wanModel}...`, 'info');
 
       if (progressPollRef.current) clearInterval(progressPollRef.current);
+      let lastBatchVidStep = '';
       progressPollRef.current = setInterval(async () => {
         try {
           const pRes = await fetch('/api/v1/generate/progress');
@@ -1079,22 +1115,33 @@ export default function App() {
                   n.id.startsWith('video-') ? { ...n, data: { ...n.data, liveProgress: pData } } : n
                 )
               );
+              const stepKey = `${pData.current_scene}_${pData.step}`;
+              if (pData.node === 'card4' && stepKey !== lastBatchVidStep) {
+                lastBatchVidStep = stepKey;
+                addLog(`[Video Engine] ${pData.message}`, pData.step === pData.total_steps ? 'success' : 'info');
+              }
             }
           }
         } catch { }
-      }, 500);
+      }, 1000);
 
       const videos = [];
       try {
-        // Stage 2A: Batch pre-encode ALL N scene prompts once in isolated FP8 T5 so T5 unloads before GPU video loop
+        // Stage 2A: Batch pre-encode ALL N scene prompts once in isolated FP8 T5 (skipped automatically when Remote Colab GPU is active)
         try {
-          addLog(`[Stage 1/2 • FP8 Batch Cache] Pre-encoding all ${scenesPayload.length} scene motion prompt(s) once before GPU video synthesis...`, 'info');
+          const activeRemoteUrl = modelNode?.data?.remoteGpuUrl || null;
+          if (!activeRemoteUrl) {
+            addLog(`[Stage 1/2 • FP8 Batch Cache] Pre-encoding all ${scenesPayload.length} scene motion prompt(s) once before GPU video synthesis...`, 'info');
+          } else {
+            addLog(`[Remote Colab GPU] Using Cloud GPU Server (${activeRemoteUrl}) — 0 GB Local RAM/VRAM used for video synthesis!`, 'success');
+          }
           const preRes = await fetch('/api/v1/scenes/preencode-video-prompts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               run_id: runId,
               wan_model: wanModel,
+              remote_gpu_url: activeRemoteUrl,
               scenes: scenesPayload.map((scItem, i) => ({
                 scene_number: i + 1,
                 video_motion_prompt: (scItem && scItem.video_motion_prompt) || '',
@@ -1102,7 +1149,7 @@ export default function App() {
               })),
             }),
           });
-          if (preRes.ok) {
+          if (preRes.ok && !activeRemoteUrl) {
             const preData = await preRes.json();
             addLog(`[Stage 1/2 Complete] Cached ${preData.encoded_count + preData.cached_hits} scene embedding(s) & released T5! Launching ~2.6 GB FP8 GPU Video Engine...`, 'success');
           }
@@ -1164,6 +1211,7 @@ export default function App() {
               total_scenes: scenesPayload.length,
               wan_model: wanModel,
               aspect_ratio: aspectRatio,
+              remote_gpu_url: modelNode?.data?.remoteGpuUrl || null,
               source_image_url: fr.imageUrl || fr.url,
               source_image_path: fr.file_path || fr.filePath,
               video_motion_prompt: sc.video_motion_prompt || '',
@@ -1261,7 +1309,7 @@ export default function App() {
       const fluxModel = promptNode?.data?.fluxModel || 'Qwen-Image-2.1';
       const characters = selectedCharactersRef.current || promptNode?.data?.characters || ['female'];
       const wantsMale = characters.includes('male') && !characters.includes('female');
-      const wanModel = modelNode?.data?.wanModel || 'LTX-Video-2B';
+      const wanModel = modelNode?.data?.wanModel || 'Wan2.2-I2V-A14B';
       const scenes = promptNode?.data?.scenes || [{ id: 1, text: '', duration: '5s' }];
       const rawOptimizedScenes =
         providedOptimizedScenes || plannerNode?.data?.optimizedScenes || [];
@@ -1539,6 +1587,43 @@ export default function App() {
                 );
                 addLog(`Aspect ratio set: ${val}`, 'info');
               },
+              onUpdateRemoteGpuUrl: async (newUrl) => {
+                try {
+                  const res = await fetch('/api/v1/scenes/remote-gpu-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ remote_url: newUrl || '' }),
+                  });
+                  if (res.ok) {
+                    const st = await res.json();
+                    setNodes((all) =>
+                      all.map((n) =>
+                        n.id === '0'
+                          ? {
+                            ...n,
+                            data: {
+                              ...n.data,
+                              remoteGpuUrl: st.remote_url || '',
+                              remoteGpuOnline: Boolean(st.online),
+                              remoteGpuEngine: st.engine || '',
+                              remoteGpuDevice: st.gpu || '',
+                            },
+                          }
+                          : n
+                      )
+                    );
+                    if (st.online) {
+                      addLog(`[Card 0 • Colab GPU Connected] ${st.message} (${st.remote_url})`, 'success');
+                    } else if (st.configured) {
+                      addLog(`[Card 0 • Colab GPU Notice] ${st.message}`, 'error');
+                    } else {
+                      addLog(`[Card 0] Switched to Local GPU Mode.`, 'info');
+                    }
+                  }
+                } catch (e) {
+                  addLog(`[Card 0 • Colab Config Error] ${e.message}`, 'error');
+                }
+              },
             },
           };
         }
@@ -1589,7 +1674,7 @@ export default function App() {
                 setNodes((all) => {
                   const modelNode = all.find((n) => n.id === '0');
                   const fluxModel = modelNode?.data?.fluxModel || 'Qwen-Image-2.1';
-                  const wanModel = modelNode?.data?.wanModel || 'LTX-Video-2B';
+                  const wanModel = modelNode?.data?.wanModel || 'Wan2.2-I2V-A14B';
                   const aspectRatio = modelNode?.data?.aspectRatio || '16:9';
 
                   const coreNodes = all

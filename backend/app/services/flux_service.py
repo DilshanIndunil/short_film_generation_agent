@@ -400,6 +400,132 @@ class FluxLocalGPUService:
             logger.error(f"Failed to load local GPU pipeline: {e}")
         return False
 
+    @staticmethod
+    def _load_qwen3vl_fp8_streaming(te_dir: Path) -> Any:
+        """
+        Zero-Spike Direct FP8 Streaming Loader for Qwen3-VL Text Encoder:
+        Initializes on meta device (0 MB RAM), skips unused lm_head and vision tower (~2.7 GB saved),
+        streams each safetensors shard tensor-by-tensor into FP8 (Linear) or cloned BF16 (Norm/Embed)
+        so shard mmaps close immediately after each file. Peak RAM drops from ~25 GB down to 7.57 GB!
+        """
+        import gc
+        import torch  # type: ignore
+        from safetensors.torch import safe_open  # type: ignore
+        from transformers import AutoConfig, Qwen3VLForConditionalGeneration  # type: ignore
+        from diffusers.hooks import apply_layerwise_casting  # type: ignore
+
+        cfg = AutoConfig.from_pretrained(str(te_dir), local_files_only=True)
+        with torch.device("meta"):
+            te = Qwen3VLForConditionalGeneration(cfg)
+        te.lm_head = torch.nn.Identity()
+        if hasattr(te.model, "visual"):
+            te.model.visual = None
+
+        apply_layerwise_casting(
+            te,
+            storage_dtype=torch.float8_e4m3fn,
+            compute_dtype=torch.bfloat16,
+        )
+        hooked_linear_prefixes = {
+            name
+            for name, mod in te.named_modules()
+            if isinstance(mod, torch.nn.Linear)
+            and hasattr(mod, "_diffusers_hook")
+            and "layerwise_casting" in mod._diffusers_hook.hooks
+        }
+        param_names = {n for n, _ in te.named_parameters()}
+        for sf in sorted(te_dir.glob("*.safetensors")):
+            with safe_open(str(sf), framework="pt", device="cpu") as f:
+                for k in f.keys():
+                    if k.startswith("lm_head") or "visual." in k:
+                        continue
+                    raw_t = f.get_tensor(k)
+                    mod_name, _, attr_name = k.rpartition(".")
+                    if attr_name == "weight" and mod_name in hooked_linear_prefixes:
+                        tensor = raw_t.to(torch.float8_e4m3fn)
+                    else:
+                        tensor = raw_t.to(torch.bfloat16).clone()
+                    del raw_t
+                    submod = te.get_submodule(mod_name) if mod_name else te
+                    if k in param_names:
+                        setattr(submod, attr_name, torch.nn.Parameter(tensor, requires_grad=False))
+                    else:
+                        setattr(submod, attr_name, tensor)
+            gc.collect()
+
+        for _, mod in te.named_modules():
+            for bname, buf in list(mod._buffers.items()):
+                if buf is not None and buf.is_meta:
+                    if hasattr(mod, "rope_init_fn") and hasattr(mod, "config"):
+                        inv_freq, _ = mod.rope_init_fn(mod.config, device="cpu")
+                        mod.register_buffer(bname, inv_freq, persistent=False)
+                    else:
+                        mod.register_buffer(bname, torch.zeros(buf.shape, dtype=buf.dtype, device="cpu"), persistent=False)
+
+        gc.collect()
+        return te
+
+    @staticmethod
+    def _load_qwen_transformer_fp8_streaming(t_dir: Path) -> Any:
+        """
+        Zero-Spike Direct FP8 Streaming Loader for QwenImage21Transformer2DModel:
+        Initializes on meta device (0 MB RAM) and streams the 2 safetensors shards tensor-by-tensor
+        directly into FP8 (hooked Linear) or cloned BF16 (Norm/Bias/norm_out.linear) so the 9.97 GB + 4.26 GB
+        shard mmaps close immediately. Peak RAM drops from ~21.3 GB down to 7.12 GB!
+        """
+        import gc
+        import torch  # type: ignore
+        from accelerate import init_empty_weights  # type: ignore
+        from safetensors.torch import safe_open  # type: ignore
+        from diffusers import QwenImage21Transformer2DModel  # type: ignore
+        from diffusers.models.transformers.transformer_qwenimage21 import QwenImage21Rope  # type: ignore
+
+        config = QwenImage21Transformer2DModel.load_config(str(t_dir))
+        with init_empty_weights():
+            model = QwenImage21Transformer2DModel.from_config(config)
+
+        # Ensure non-parameter RoPE helper is initialized on real device
+        axes_dims_rope = list(config.get("axes_dims_rope", (16, 56, 56)))
+        model.pos_embed = QwenImage21Rope(theta=10000, axes_dim=axes_dims_rope)
+
+        # Attach layerwise casting hooks FIRST so diffusers skips norm_out.linear & pos_embed automatically
+        model.enable_layerwise_casting(
+            storage_dtype=torch.float8_e4m3fn,
+            compute_dtype=torch.bfloat16,
+        )
+        hooked_linear_prefixes = {
+            name
+            for name, mod in model.named_modules()
+            if isinstance(mod, torch.nn.Linear)
+            and hasattr(mod, "_diffusers_hook")
+            and "layerwise_casting" in mod._diffusers_hook.hooks
+        }
+        param_names = {n for n, _ in model.named_parameters()}
+        for sf in sorted(t_dir.glob("*.safetensors")):
+            with safe_open(str(sf), framework="pt", device="cpu") as f:
+                for k in f.keys():
+                    raw_t = f.get_tensor(k)
+                    mod_name, _, attr_name = k.rpartition(".")
+                    if attr_name == "weight" and mod_name in hooked_linear_prefixes:
+                        tensor = raw_t.to(torch.float8_e4m3fn)
+                    else:
+                        tensor = raw_t.to(torch.bfloat16).clone()
+                    del raw_t
+                    submod = model.get_submodule(mod_name) if mod_name else model
+                    if k in param_names:
+                        setattr(submod, attr_name, torch.nn.Parameter(tensor, requires_grad=False))
+                    else:
+                        setattr(submod, attr_name, tensor)
+            gc.collect()
+
+        for _, mod in model.named_modules():
+            for bname, buf in list(mod._buffers.items()):
+                if buf is not None and buf.is_meta:
+                    mod.register_buffer(bname, torch.zeros(buf.shape, dtype=buf.dtype, device="cpu"), persistent=False)
+
+        gc.collect()
+        return model
+
     def _render_qwen_staged_fp8(
         self,
         qwen_dir: Path,
@@ -414,20 +540,19 @@ class FluxLocalGPUService:
     ) -> None:
         """
         Smart Hybrid 3-Micro-Stage Qwen-Image-2.1 Renderer for 16GB RAM + 8GB RTX 4060 (Ada FP8):
-          Stage 1A: Isolated Qwen3-VL Text Encoder (FP8 layerwise cast) -> caches prompt_embeds (<2MB) -> 100% Unload
-          Stage 1B: Isolated QwenImage21Transformer2DModel (FP8 storage ~6.6GB + Async CUDA Stream Group Offload) -> latents -> 100% Unload
+          Stage 1A: Isolated Qwen3-VL Text Encoder (7.57 GB Direct FP8 Stream) -> caches prompt_embeds (<2MB) -> 100% Unload
+          Stage 1B: Isolated QwenImage21Transformer2DModel (7.12 GB Direct FP8 Stream + Async CUDA Stream Group Offload) -> latents -> 100% Unload
           Stage 1C: Isolated AutoencoderKLQwenImage21 (1.26GB directly on GPU) -> high-res PNG decode -> 100% Unload
         """
         import gc
         import torch  # type: ignore
-        from transformers import Qwen3VLProcessor, Qwen3VLForConditionalGeneration  # type: ignore
+        from transformers import Qwen3VLProcessor  # type: ignore
         from diffusers import (  # type: ignore
             QwenImage21Pipeline,
-            QwenImage21Transformer2DModel,
             AutoencoderKLQwenImage21,
             FlowMatchEulerDiscreteScheduler,
         )
-        from diffusers.hooks import apply_layerwise_casting, apply_group_offloading  # type: ignore
+        from diffusers.hooks import apply_group_offloading  # type: ignore
 
         # Ensure any video or legacy image pipelines are completely out of RAM/VRAM first
         try:
@@ -451,9 +576,9 @@ class FluxLocalGPUService:
                 total_scenes=total_scenes,
                 step=0,
                 total_steps=qwen_steps,
-                message=f"Scene {current_scene}/{total_scenes}: [Stage 1/3] Encoding Master Prompt via Qwen3-VL (FP8 Isolated)...",
+                message=f"Scene {current_scene}/{total_scenes}: [Stage 1/3] Encoding Master Prompt via Qwen3-VL (7.5 GB FP8 Direct Stream)...",
             )
-            logger.info(f"[Qwen-Image-2.1 Stage 1/3] Loading isolated Qwen3-VL Text Encoder from {qwen_dir / 'text_encoder'}...")
+            logger.info(f"[Qwen-Image-2.1 Stage 1/3] Streaming Qwen3-VL Text Encoder directly into FP8 from {qwen_dir / 'text_encoder'}...")
             processor: Any = None
             scheduler_enc: Any = None
             text_encoder: Any = None
@@ -461,21 +586,7 @@ class FluxLocalGPUService:
             try:
                 processor = Qwen3VLProcessor.from_pretrained(str(qwen_dir / "processor"), local_files_only=True)
                 scheduler_enc = FlowMatchEulerDiscreteScheduler.from_pretrained(str(qwen_dir / "scheduler"), local_files_only=True)
-                text_encoder = Qwen3VLForConditionalGeneration.from_pretrained(
-                    str(qwen_dir / "text_encoder"),
-                    torch_dtype=torch.bfloat16,
-                    low_cpu_mem_usage=True,
-                    local_files_only=True,
-                )
-                try:
-                    apply_layerwise_casting(
-                        text_encoder,
-                        storage_dtype=torch.float8_e4m3fn,
-                        compute_dtype=torch.bfloat16,
-                    )
-                    gc.collect()
-                except Exception as lc_err:
-                    logger.debug(f"Qwen3-VL FP8 cast notice: {lc_err}")
+                text_encoder = self._load_qwen3vl_fp8_streaming(qwen_dir / "text_encoder")
 
                 apply_group_offloading(
                     text_encoder,
@@ -520,9 +631,9 @@ class FluxLocalGPUService:
             total_scenes=total_scenes,
             step=0,
             total_steps=qwen_steps,
-            message=f"Scene {current_scene}/{total_scenes}: [Stage 2/3] Loading Qwen-Image-2.1 FP8 Transformer (6.6 GB) on RTX 4060...",
+            message=f"Scene {current_scene}/{total_scenes}: [Stage 2/3] Streaming Qwen-Image-2.1 FP8 Transformer (7.1 GB) on RTX 4060...",
         )
-        logger.info(f"[Qwen-Image-2.1 Stage 2/3] Loading isolated FP8 QwenImage21Transformer2DModel ({qwen_steps} steps)...")
+        logger.info(f"[Qwen-Image-2.1 Stage 2/3] Streaming isolated FP8 QwenImage21Transformer2DModel ({qwen_steps} steps)...")
 
         def _qwen_step_cb(pipeline, step_index, timestep, callback_kwargs):
             step_num = min(step_index + 1, qwen_steps)
@@ -554,18 +665,7 @@ class FluxLocalGPUService:
         try:
             processor_den = Qwen3VLProcessor.from_pretrained(str(qwen_dir / "processor"), local_files_only=True)
             scheduler_den = FlowMatchEulerDiscreteScheduler.from_pretrained(str(qwen_dir / "scheduler"), local_files_only=True)
-            transformer = QwenImage21Transformer2DModel.from_pretrained(
-                str(qwen_dir / "transformer"),
-                torch_dtype=torch.bfloat16,
-                low_cpu_mem_usage=True,
-                local_files_only=True,
-            )
-            # Native RTX 4060 Ada FP8 storage (~6.6 GB in physical RAM!) + bfloat16 Tensor Core compute
-            transformer.enable_layerwise_casting(
-                storage_dtype=torch.float8_e4m3fn,
-                compute_dtype=torch.bfloat16,
-            )
-            gc.collect()
+            transformer = self._load_qwen_transformer_fp8_streaming(qwen_dir / "transformer")
             try:
                 transformer.enable_group_offload(
                     onload_device=torch.device("cuda"),
